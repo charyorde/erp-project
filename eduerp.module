@@ -1,0 +1,191 @@
+<?php
+
+function eduerp_menu() {
+
+  $items['admin/settings/eduerp'] = array (
+    'title' => 'EduERP Configuration',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array (
+      'eduerp_admin_settings'
+    ),
+    'access arguments' => array (
+      'administer site configuration'
+    ),
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  return $items;
+}
+
+
+/**
+ * implements the simpletest testing framework hook
+ * for more information see http://drupal.org/project/simpletest
+ */
+function eduerp_simpletest() {
+  $module_name = "eduerp";
+  $dir = drupal_get_path('module', $module_name) . "/tests";
+  $tests = file_scan_directory($dir, '\.test$');
+  return array_keys($tests);
+}
+
+
+function eduerp_lga() {
+  static $ritles;
+  if (!$titles) {
+    $titles[0] = '';
+    $r = db_query("select * from lga order by lga_name");
+    while ($f = db_fetch_object($r))
+      $titles[$f->lga_id] = $f->lga_name;
+  }
+  return $titles;
+}
+function eduerp_states($state_id = 0) {
+  static $ritles;
+  if (!$titles) {
+    $titles[0] = '';
+    $r = db_query("select * from state order by state_name");
+    while ($f = db_fetch_object($r))
+      $titles[$f->state_id] = $f->state_name;
+  }
+  return ($state_id) ? $titles[$state_id] : $titles;
+
+}
+
+
+function eduerp_admin_settings() {
+  $form['RegisterAllCoursesatStartofSession'] = array(
+    '#type' => 'checkbox',
+    '#title' => 'Register All Courses at Start of Session',
+    '#default_value' => variable_get('RegisterAllCoursesatStartofSession', 0),
+    '#description' => 'This switch determines whether students register courses for both semesters at the start of the first semester',
+    '#tree' => TRUE
+  );
+
+  $form['RegistrarApprovesGrades'] = array(
+    '#type' => 'checkbox',
+    '#title' => 'RegistrarApprovesGrades',
+    '#default_value' => variable_get('RegistrarApprovesGrades', 0),
+    '#description' => 'This switch determines whether student grades are approved by the Registrar (if not they go straight to the Vice Chancellor)',
+    '#tree' => TRUE
+  );
+
+  return system_settings_form($form);
+}
+
+
+/**
+ * loads a user's profile for reading and modification
+ * @param int $uid specifies the user id of the profile to load
+ * @param string $profile_type (optional) specifies the actual
+ *  profile type to load
+ * @return object returns the profile node or false if there's none
+ */
+function eduerp_load_profile($uid, $profile_type = 'profile') {
+  if ($node = node_load(array('type' => $profile_type, 'uid' => $uid))) {
+    return $node;
+  } else {
+    return false;
+  }
+}
+
+/**
+ * saves a user profile node - nothing fanciful just a wrapper
+ *
+ * @param object $node
+ * @return void since the node_save api function doesn't return
+ *  any status, we cannot return one.
+ */
+function eduerp_save_profile($node) {
+  node_save($node);
+}
+
+/**
+ * class definition for User profiles
+ * @var int $uid stores the userid that is being used to retrieve the profile nodes
+ * @var array $field_map field map is used to store the node/field mapping
+ * @var array $profile_nodes stores the node objects used as content profiles for the user
+ */
+class UserProfile {
+  var $uid;
+  var $field_map = array();
+  var $profile_nodes = array();
+
+  /**
+   * class constructor - instantiates the object
+   * and loads necessary nodes.
+   * @var int $uid User id for the user
+   * @return object
+   */
+  function __construct($uid) {
+    $this->uid = $uid;
+
+    // obtain all content profile types and use that to map
+    // the fields to the object.
+    $content_profiles = content_profile_get_types('names');
+
+    // after obtainining the content profile types, we'll retrieve
+    // those that have been defined for this user.
+    foreach ($content_profiles as $content_profile => $content_profile_name) {
+      if ($node = eduerp_load_profile($this->uid, $content_profile)) {
+        $this->profile_nodes[$content_profile] = $node;
+      }
+    }
+
+    $this->_hydrate_fields();
+  }
+
+  /**
+   * _hydrate_fields - loads fields from the content profile nodes
+   * @return void
+   */
+  private function _hydrate_fields() {
+    foreach ($this->profile_nodes as $node) {
+      // obtain visible properties for nodes and set them
+      // it sets $this->profile_first_name = $node->field_profile_first_name
+      // for instance (supports only native type and nodereference
+      // field types)
+      // TODO: add support for other node field types
+      foreach ($node as $key => $value) {
+        if (preg_match('/^field\_(.*)/', $key, $matches)) {
+          $node_value = $node->$key;
+
+          // check the existence of readable values
+          if (is_array($node_value) && is_array($node_value[0]) && array_key_exists('value', $node_value[0])) {
+            $this->$matches[1] = $node_value[0]['value'];
+            $this->field_map[$matches[1]] = $node->type;
+          } elseif (is_array($node_value) && is_array($node_value[0])  && array_key_exists('nid', $node_value[0])) {
+            $this->$matches[1] = $node_value[0]['nid'];
+            $this->field_map[$matches[1]] = $node->type;
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * this method saves all the attached content profile nodes
+   * @return void
+   */
+  public function save() {
+    // iterate through all the profile fields and store
+    // their values in the respective nodes
+    foreach ($this as $key => $value) {
+      if (isset($this->field_map[$key])) {
+        $node_field_name = 'field_' . $key;
+        // must be returned as a reference if not
+        // it will not be saved.
+        $node_field =& $this->profile_nodes[$this->field_map[$key]]->$node_field_name;
+        if (array_key_exists('value', $node_field[0])) {
+          $node_field[0]['value'] = $value;
+        } elseif (array_key_exists('nid', $node_field[0])) {
+          $node_field[0]['nid'] = $value;
+        }
+      }
+    }
+    foreach ($this->profile_nodes as $node) {
+      node_save($node);
+    }
+  }
+}
+?>

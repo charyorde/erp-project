@@ -1,0 +1,134 @@
+<?php
+
+function hostel_allocation_install() {
+  // Install the schemas
+  drupal_install_schema('hostel_allocation');
+  
+  drupal_set_message('Hostel Allocation Module installed');
+}
+
+function hostel_allocation_uninstall() {
+  drupal_set_message('Hostel Allocation Module uninstalled');
+}
+
+function hostel_allocation_enable() {
+  install_hostel_content_types('allocation_rules_cck.txt', 'allocation_rules');
+  install_hostel_content_types('allocation_rules_description_cck.txt', 'allocation_rules_description');
+  install_hostel_content_types('allocation_settings_cck.txt', 'allocation_settings');
+  install_hostel_content_types('blocks_cck.txt', 'blocks');
+  install_hostel_content_types('hostels_cck.txt', 'hostels');
+  install_hostel_content_types('room_allocations_cck.txt', 'room_allocations');
+  install_hostel_content_types('room_reservations_cck.txt', 'room_reservations');
+  install_hostel_content_types('rooms_cck.txt', 'room');
+  
+  content_clear_type_cache();
+}
+
+function hostel_allocation_schema() {
+  $schema['allocation_block_statistics'] = array(
+    'description' => t('Allocation Block Stats'),
+    'fields' => array(
+      'block_statistics_id' => array(
+        'description' => t('Block Statistics ID'),
+        'type' => 'serial',
+        'not null' => TRUE,
+      ),
+      'block_nid' => array(
+        'description' => t('Block Node ID'),
+        'type' => 'int',
+        'not null' => TRUE,
+      ),
+      'allocation_rules_description_nid' => array(
+        'description' => t('Allocation Rules Description Node ID'),
+        'type' => 'int',
+        'not null' => TRUE,
+      ),
+      'allocation_number' => array(
+        'description' => t('Allocation Number'),
+        'type' => 'int',
+        'default' => NULL,
+      ),
+      'alloted_number' => array(
+        'description' => t('Alloted Number'),
+        'type' => 'int',
+        'not null' => TRUE,
+      ),
+      'session_name' => array(
+        'description' => t('Session Name'),
+        'type' => 'varchar',
+        'length' => '20',
+        'not null' => TRUE,
+      )
+    ),
+    'primary key' => array('block_statistics_id'),
+    'indexes' => array(
+      'block_nid' => array('block_nid'),
+      'allocation_rules_description_nid' => array('allocation_rules_description_nid'),
+      'session_name' => array('session_name')
+    )
+  );
+  
+  $schema['allocation_room_statistics'] = array(
+    'description' => t('Allocation Room Statistics'),
+    'fields' => array(
+      'room_statistics_id' => array(
+        'description' => t('Room Statistics ID'),
+        'type' => 'serial',
+        'not null' => TRUE,
+      ),
+      'room_nid' => array(
+        'description' => t('Room Node ID'),
+        'type' => 'int',
+        'not null' => TRUE,
+      ),
+      'room_capacity' => array(
+        'description' => t('Room Capacity'),
+        'type' => 'int',
+        'not null' => TRUE,
+      ),
+      'reservation_count' => array(
+        'description' => t('Reservation Counter'),
+        'type' => 'int',
+        'not null' => TRUE,
+      ),
+      'allocation_count' => array(
+        'description' => t('Allocation Count'),
+        'type' => 'int',
+        'not null' => TRUE,
+      ),
+      'session_name' => array(
+        'description' => t('Session'),
+        'type' => 'varchar',
+        'length' => '20',
+        'not null' => TRUE,
+      )
+    ),
+    'primary key' => array('room_statistics_id'),
+    'indexes' => array(
+      'room_nid' => array('room_nid'),
+      'session_name' => array('session_name'),
+      'room_capacity' => array('room_capacity'),
+      'reservation_count' => array('reservation_count'),
+      'allocation_count' => array('allocation_count'),
+    )
+  );
+  
+  return $schema;
+}
+
+function install_hostel_content_types($filename, $content_type_name) {
+  $content_type_data = file_get_contents(dirname(__FILE__) . '/cck/'.$filename);
+
+  // determine if to replace content type or create it
+  $content_type_info = content_types($content_type_name);
+
+  $form_state = array(
+    'values' => array(
+      'type_name' => (is_array($content_type_info) && array_key_exists('type', $content_type_info)) ? $content_type_name : '<create>',
+      'macro' => $content_type_data,
+    ),
+  );
+  drupal_execute('content_copy_import_form', $form_state);
+}
+
+?>

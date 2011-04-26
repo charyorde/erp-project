@@ -1,0 +1,2125 @@
+<?php
+
+function grading_menu() {
+  $items = array();
+
+  $items['grading/viewgrades'] = array(
+    'title' => 'View Course Grades',
+    'page callback' => 'drupal_goto',
+    'page arguments' => array('course'),
+    'access arguments' => array('view grading'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  $items['grading/viewgpa'] = array(
+    'title' => 'View Programme GPAs',
+    'page callback' => 'drupal_goto',
+    'page arguments' => array('gpa'),
+    'access arguments' => array('view grading'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  $items['grading/viewmygrades'] = array(
+    'title' => 'View My Grades',
+    'page callback' => 'drupal_goto',
+    'page arguments' => array('student'),
+    'access arguments' => array('view my grades'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  $items['grading/stats'] = array(
+    'title'=>'Grading Departmental Stats',
+    'page callback' => 'drupal_get_form',
+    'page arguments'=> array('grading_stats_department_form'),
+    'access arguments' => array('view grading'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  $items['grading/ahahstats'] = array(
+    'page callback' => '_grading_ahah_stats',
+    'access arguments' => array('view grading'),
+    'type' => MENU_CALLBACK,
+  );
+
+  $items['grading/statsuni'] = array(
+    'title'=>'Grading University Stats',
+    'page callback' => 'drupal_get_form',
+    'page arguments'=> array('grading_stats_uni_form'),
+    'access arguments' => array('view grading'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  $items['grading/ahahstatsuni'] = array(
+    'page callback' => '_grading_ahah_stats_uni',
+    'access arguments' => array('view grading'),
+    'type' => MENU_CALLBACK,
+  );
+
+  $items['grading/eduerpregistrarapprovalform'] = array(
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('approve_grades_registrar_form'),
+    'access arguments' => array('view grading'),
+    'type' => MENU_CALLBACK,
+  );
+
+  $items['grading/eduerpvcapprovalform'] = array(
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('approve_grades_vc_form'),
+    'access arguments' => array('view grading'),
+    'type' => MENU_CALLBACK,
+  );
+
+  $items['grading/studentdetails'] = array(
+    'title'=>'Grading Student Details',
+    'page callback' => 'drupal_get_form',
+    'page arguments'=> array('grading_student_details_form'),
+    'access arguments' => array('view grading'),
+    'type' => MENU_NORMAL_ITEM,
+  );
+
+  $items['grading/ahahstudentdetails'] = array(
+    'page callback' => '_grading_ahah_studentdetails',
+    'access arguments' => array('view grading'),
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+
+/**
+ * Implementation of hook_field_access().
+ *
+ * @see content_access().
+ */
+function grading_field_access($op, $field, $account, $node = NULL) {
+  global $user;
+  static $locked = array();               // Cache
+  static $editafterfinalapproval = FALSE; // Cache
+
+  if (is_null($account)) {
+    $account = $user;
+  }
+
+  // User #1 has all privileges:
+  if ($account->uid == 1) {
+    return TRUE;
+  }
+
+  switch ($op) {
+    case 'view':
+      if (empty($node)) return TRUE; // I believe this is for the headings
+
+      $sg_fields = array('field_ca1', 'field_ca2', 'field_ca3', 'field_ca4', 'field_exam_score', 'field_total_score', 'field_gradepoint', 'field_grade');
+      if (in_array('Student', $account->roles) && in_array($field['field_name'], $sg_fields)) return FALSE; // Student not allowed access these even though it will be for their own record!
+
+      return TRUE;
+
+    case 'edit':
+      $editablegradingfields = array('field_ca1' => 1, 'field_ca2' => 1, 'field_ca3' => 1, 'field_ca4' => 1, 'field_exam_score' => 1, 'field_comment_grades' => 1);
+      if (empty($editablegradingfields[$field['field_name']])) {
+        return TRUE; // All fields are editable except above ones for student_grades, however content_permissions will have most fields not editable in any case overriding this
+      }
+
+      if (empty($node)) return FALSE;
+      if (empty($node->nid)) return TRUE;  // Seems that admin of content types can call with nid empty
+
+      if (empty($locked)) { // Not cached...
+        $locked[-1] = -1; // Mark as cached
+
+        // Retrieve the locked indicators for all fields for any student_grades that reference the same course and session as this student_grades node
+        // and the ci has the current user as a lecturer.
+        // Note the course_grades view only will ever show grades from one course and session at a time, so caching only needs these.
+        // Another assumption made here is that none of the fields are reused in other tables so that Drupal will not store them in dedicated tables!
+        $sql = "SELECT sg.nid, sg.field_ca1locked_value AS field_ca1, sg.field_ca2locked_value AS field_ca2, sg.field_ca3locked_value AS field_ca3, sg.field_ca4locked_value AS field_ca4, sg.field_examscorelocked_value AS field_exam_score
+          FROM
+            {content_type_student_grades} sgnode,
+            {content_type_student_grades} sg,
+            {content_type_course_instance} cinode,
+            {content_type_course_instance} ci,
+            {content_type_course} c
+          WHERE
+            sgnode.nid={$node->nid} AND
+            sgnode.field_course_instance_nid=cinode.nid AND
+            cinode.field_course_id_nid=c.nid AND
+            ci.field_course_id_nid=c.nid AND
+            sg.field_course_instance_nid=ci.nid AND
+            cinode.field_sess_name_value=ci.field_sess_name_value AND
+            (ci.field_lecturer_uid={$account->uid} OR ci.field_lecturer_alternate_uid={$account->uid})";
+        $result = db_query($sql);
+
+        while ($row = db_fetch_array($result)) {
+          $locked[$row['nid']] = $row;
+        }
+
+        // Retrieve the locked indicators for all fields for any student_grades that reference the same course and session as this student_grades node
+        // and the user has edit rights by being some kind of Examination Officer
+
+        $inroles = "'Department Examination Officer', 'Faculty Examination Officer', 'University Examination Officer'";
+
+        $sql = "SELECT DISTINCT sg.nid, sg.field_ca1locked_value AS field_ca1, sg.field_ca2locked_value AS field_ca2, sg.field_ca3locked_value AS field_ca3, sg.field_ca4locked_value AS field_ca4, sg.field_examscorelocked_value AS field_exam_score
+          FROM
+            {content_type_student_grades} sgnode,
+            {content_type_student_grades} sg,
+            {content_type_course_instance} cinode,
+            {content_type_course_instance} ci,
+            {content_type_course} c,
+            {content_type_department} d,
+            {eduerp_roles} er
+          WHERE
+            sgnode.nid={$node->nid} AND
+            sgnode.field_course_instance_nid=cinode.nid AND
+            cinode.field_course_id_nid=c.nid AND
+            ci.field_course_id_nid=c.nid AND
+            sg.field_course_instance_nid=ci.nid AND
+            cinode.field_sess_name_value=ci.field_sess_name_value AND
+            c.field_department_nid_nid=d.nid AND
+            (d.nid=er.department_id OR d.field_college_id_nid=er.college_id OR (er.department_id=0 AND er.college_id=0)) AND
+            er.role IN ($inroles) AND
+            er.uid={$account->uid}";
+        $result = db_query($sql);
+
+        while ($row = db_fetch_array($result)) {
+          $locked[$row['nid']] = $row;
+        }
+
+        // Can this user edit grades after final approval?
+        $inroles = "'University Examination Officer'";
+
+        $sql = "SELECT 1
+          FROM
+            {content_type_student_grades} sgnode,
+            {content_type_course_instance} cinode,
+            {content_type_course} c,
+            {content_type_department} d,
+            {eduerp_roles} er
+          WHERE
+            sgnode.nid={$node->nid} AND
+            sgnode.field_course_instance_nid=cinode.nid AND
+            cinode.field_course_id_nid=c.nid AND
+            c.field_department_nid_nid=d.nid AND
+            (d.nid=er.department_id OR d.field_college_id_nid=er.college_id OR (er.department_id=0 AND er.college_id=0)) AND
+            er.role IN ($inroles) AND
+            er.uid={$account->uid}
+          LIMIT 1";
+        $result = db_query($sql);
+        if (db_fetch_array($result)) $editafterfinalapproval = TRUE;
+      }
+
+      if ($field['field_name'] === 'field_comment_grades') $field['field_name'] = 'field_exam_score'; // Assume comment should not be edited if the exam_score is locked
+
+      // Check if this student_grades is owned by this lecturer
+      if (empty($locked[$node->nid])) return FALSE;
+
+      // Check if this lock is empty
+      if (empty($locked[$node->nid][$field['field_name']])) return TRUE;
+
+      if ($editafterfinalapproval && $locked[$node->nid][$field['field_name']] == 5) return TRUE;
+
+      return FALSE;
+   }
+  return TRUE;
+}
+
+
+/**
+ * Implementation of hook_views_pre_build().
+ *
+ * Called before view build... we remove unneeded columns from course_grades
+ */
+function grading_views_pre_build(&$view) {
+  if ($view->name=='course_grades') {
+    if (!empty($_SESSION['views']['course_grades']['default']['coursecode']) &&
+      !empty($_SESSION['views']['course_grades']['default']['session']) &&
+      !empty($_SESSION['views']['course_grades']['default']['semester'])) {
+
+      $coursecode = $_SESSION['views']['course_grades']['default']['coursecode'];
+      $session = $_SESSION['views']['course_grades']['default']['session'];
+
+      if (empty($_SESSION['views']['course_grades']['default']['semester'])) $semester = 'All';
+      else $semester = $_SESSION['views']['course_grades']['default']['semester'];
+      if ($semester === 'All') $semesterwhere = '';
+      else $semesterwhere = 'AND ci.field_semester_name_value=' . (int)$semester;
+
+      if (empty($_SESSION['views']['course_grades']['default']['location'])) $location = 'All';
+      else $location = $_SESSION['views']['course_grades']['default']['location'];
+      if ($location === 'All') $locationwhere = '';
+      else $locationwhere = 'AND ci.field_location_value=' . (int)$location;
+
+      $sql = "SELECT cgw.number_of_ca
+        FROM {course_grade_weightings} cgw, {content_type_course} c
+        WHERE
+          (cgw.course_id=c.nid OR cgw.course_id=0) AND
+          c.field_code_value='%s'
+        ORDER BY cgw.course_id DESC";  // Select the course specific one (if any) first followed by the default one
+      $weightings = db_query($sql, $coursecode);
+      $row = db_fetch_object($weightings);
+      $number_of_ca = $row->number_of_ca;
+
+      $sql = "SELECT DISTINCT ci.field_repeat_value AS repeatexam
+        FROM {content_type_course} c, {content_type_course_instance} ci
+        WHERE
+          c.field_code_value='%s' AND
+          c.nid=ci.field_course_id_nid AND
+          ci.field_sess_name_value='%s'
+          $semesterwhere $locationwhere";
+      $staffresult = db_query($sql, $coursecode, $session);
+      $staff = db_fetch_object($staffresult);
+
+      if ($staff->repeatexam) $number_of_ca = 0;
+
+      if ($number_of_ca < 1) {
+        unset(
+          $view->display['default']->handler->options['fields']['field_ca1_value'],
+          $view->display['default']->handler->options['style_options']['columns']['field_ca1_value'],
+          $view->display['default']->handler->options['style_options']['info']['field_ca1_value']
+        );
+      }
+      if ($number_of_ca < 2) {
+        unset(
+          $view->display['default']->handler->options['fields']['field_ca2_value'],
+          $view->display['default']->handler->options['style_options']['columns']['field_ca2_value'],
+          $view->display['default']->handler->options['style_options']['info']['field_ca2_value']
+        );
+      }
+      if ($number_of_ca < 3) {
+        unset(
+          $view->display['default']->handler->options['fields']['field_ca3_value'],
+          $view->display['default']->handler->options['style_options']['columns']['field_ca3_value'],
+          $view->display['default']->handler->options['style_options']['info']['field_ca3_value']
+        );
+      }
+      if ($number_of_ca < 4) {
+        unset(
+          $view->display['default']->handler->options['fields']['field_ca4_value'],
+          $view->display['default']->handler->options['style_options']['columns']['field_ca4_value'],
+          $view->display['default']->handler->options['style_options']['info']['field_ca4_value']
+        );
+      }
+    }
+  }
+}
+
+
+/**
+ * Implementation of hook_node_access_records().
+ *
+ * Called on node save to add permissions for the node
+ */
+function grading_node_access_records($node) {
+  $grants = array();
+
+  if ($node->type === 'student_grades') {
+    $course_instance = $node->field_course_instance[0]['nid'];
+    $student_gpa     = $node->field_student_gpa[0]['nid'];
+
+    $sql = "SELECT
+      c.field_department_nid_nid AS course_department_id,
+      d_course.field_college_id_nid AS course_college_id,
+      p.field_department_id_nid AS student_department_id,
+      d_student.field_college_id_nid AS student_college_id
+    FROM
+      {content_type_course_instance} ci,
+      {content_type_course} c,
+      {content_type_department} d_course,
+      {content_type_student_gpa} gpa,
+      {content_type_program} p,
+      {content_type_department} d_student
+    WHERE
+      ci.nid=%d AND
+      c.nid=ci.field_course_id_nid AND
+      d_course.nid=c.field_department_nid_nid AND
+      gpa.nid=%d AND
+      p.nid=gpa.field_program_ref_gpa_nid AND
+      d_student.nid=p.field_department_id_nid
+    LIMIT 1";
+    $result = db_query($sql, $course_instance, $student_gpa);
+
+    if ($row = db_fetch_object($result)) {
+      $grants[] = array(
+        'realm' => 'student',
+        'gid' => $node->field_mat_no[0]['uid'],
+        'grant_view' => TRUE,
+        'grant_update' => FALSE,
+        'grant_delete' => FALSE,
+        'priority' => 0,
+      );
+
+      $grants[] = array(
+        'realm' => 'course_instance',
+        'gid' => $course_instance,
+        'grant_view' => TRUE,
+        'grant_update' => FALSE,
+        'grant_delete' => FALSE,
+        'priority' => 0,
+      );
+
+      $grants[] = array(
+        'realm' => 'department',
+        'gid' => $row->course_department_id,
+        'grant_view' => TRUE,
+        'grant_update' => FALSE,
+        'grant_delete' => FALSE,
+        'priority' => 0,
+      );
+
+      if ($row->course_department_id != $row->student_department_id) {
+        $grants[] = array(
+          'realm' => 'department',
+          'gid' => $row->student_department_id,
+          'grant_view' => TRUE,
+          'grant_update' => FALSE,
+          'grant_delete' => FALSE,
+          'priority' => 0,
+        );
+      }
+
+      $grants[] = array(
+        'realm' => 'college',
+        'gid' => $row->course_college_id,
+        'grant_view' => TRUE,
+        'grant_update' => FALSE,
+        'grant_delete' => FALSE,
+        'priority' => 0,
+      );
+
+      if ($row->course_college_id != $row->student_college_id) {
+        $grants[] = array(
+          'realm' => 'college',
+          'gid' => $row->student_college_id,
+          'grant_view' => TRUE,
+          'grant_update' => FALSE,
+          'grant_delete' => FALSE,
+          'priority' => 0,
+        );
+      }
+    }
+    else {
+      error_log("Failed to find department and college records for student_grades $node->nid");
+    }
+  }
+  elseif ($node->type === 'student_gpa') {
+    $program = $node->field_program_ref_gpa[0]['nid'];
+
+    $sql = "SELECT
+      p.field_department_id_nid AS department_id,
+      d.field_college_id_nid AS college_id
+    FROM
+      {content_type_program} p,
+      {content_type_department} d
+    WHERE
+      p.nid=%d AND
+      d.nid=p.field_department_id_nid
+    LIMIT 1";
+    $result = db_query($sql, $program);
+
+    if ($row = db_fetch_object($result)) {
+      // Student never needs to see this directly, so will not be given rights
+      // Lecturers not allowed to see GPA directly
+
+      $grants[] = array(
+        'realm' => 'department',
+        'gid' => $row->department_id,
+        'grant_view' => TRUE,
+        'grant_update' => FALSE,
+        'grant_delete' => FALSE,
+        'priority' => 0,
+      );
+
+      $grants[] = array(
+        'realm' => 'college',
+        'gid' => $row->college_id,
+        'grant_view' => TRUE,
+        'grant_update' => FALSE,
+        'grant_delete' => FALSE,
+        'priority' => 0,
+      );
+    }
+    else {
+      error_log("Failed to find department and college records for student_gpa $node->nid");
+    }
+  }
+  elseif ($node->type === 'student_program') {
+    // Should not be directly seen by anyone except some special university level users
+  }
+  elseif ($node->type === 'approval') {
+    // Should not be directly seen by anyone except some special university level users
+  }
+  else {
+    $grants[] = array(
+      'realm' => 'all',
+      'gid' => 0,
+      'grant_view' => TRUE,
+      'grant_update' => FALSE,
+      'grant_delete' => FALSE,
+      'priority' => 0,
+    );
+  }
+
+  // Give global access to nodes to some special university level users (this will be deleted when 'Rebuilding content access permissions' unless it is here)
+  db_query("INSERT IGNORE INTO {node_access} (nid, gid, realm, grant_view, grant_update, grant_delete) VALUES (0, 0, 'university', 1, 0, 0)");
+
+  return $grants;
+}
+
+
+/**
+ * Implementation of hook_node_grants().
+ *
+ * Called on node access to see if what permissions a user has
+ */
+function grading_node_grants($account, $op) {
+  static $grantsbyuid = array(); // Cache
+
+  $grants = array();
+
+  if (empty($account->uid)) return $grants;
+
+  if (isset($grantsbyuid[$account->uid])) return $grantsbyuid[$account->uid];
+
+  $ci_nids = array();
+  $department_ids = array();
+  $college_ids = array();
+  $university = false;
+  $universityapproved = false;
+
+  $sql = "SELECT nid FROM {content_type_course_instance} WHERE field_lecturer_uid=%d OR field_lecturer_alternate_uid=%d";
+  $nids = db_query($sql, $account->uid, $account->uid);
+  while ($nid = db_fetch_object($nids)) {
+    $ci_nids[] = $nid->nid;
+  }
+
+  $sql = "SELECT * FROM {eduerp_roles} WHERE uid=%d";
+  $roles = db_query($sql, $account->uid);
+  while ($role = db_fetch_object($roles)) {
+
+    $viewdepartmentgrading = array('Head of Department', 'Department Examination Officer', 'Department Examination Viewer');
+    if (in_array($role->role, $viewdepartmentgrading)) $department_ids[] = $role->department_id;
+
+    $viewcollegegrading = array('Dean of Faculty', 'Faculty Examination Officer', 'Faculty Examination Viewer');
+    if (in_array($role->role, $viewcollegegrading)) $college_ids[] = $role->college_id;
+
+    $viewuniversitygrading = array('Registrar', 'Vice-Chancellor', 'University Examination Officer', 'University Examination Viewer');
+    if (in_array($role->role, $viewuniversitygrading)) $university = true;
+
+    $viewuniversityapprovedgrading = array('Academic Staff', 'Registry');
+    if (in_array($role->role, $viewuniversityapprovedgrading)) $universityapproved = true;
+  }
+
+  // Student is allowed see own student_grades record (fields shown will be limited by grading_field_access() )
+  $grants['student'] = array($account->uid);
+
+  // user is a lecturer in these course_instance(s), so can see them
+  if (!empty($ci_nids)) {
+    $grants['course_instance'] = $ci_nids;
+  }
+
+  if (!empty($department_ids)) {
+    // This user has departmental role(s) that allows them to see in progress grading
+    $grants['department'] = array_unique($department_ids);
+  }
+
+  if (!empty($college_ids)) {
+    // This user has college role(s) that allows them to see in progress grading
+    $grants['college'] = array_unique($college_ids);
+  }
+
+  if ($university) {
+    // This user has a university role that allows them to see in progress grading
+    $grants['university'] = array(0); // This will match the nid=0, gid=0 system-wide grant created in grading_node_access_records()
+  }
+
+  if ($universityapproved) { // Could instead base this on the Drupal Staff role (if all such should be allowed)
+    // This user has a university role that allows them to see approved grading
+    $grants['universityapproved'] = array(0); // This will match the gid=0 node grant
+  }
+
+  $grantsbyuid[$account->uid] = $grants;
+
+  return $grants;
+}
+
+
+
+function grading_stats_department_form(&$obj) {
+  $sessiondefault = variable_get('eduerp_current_session', '');
+  $semesterdefault = variable_get('eduerp_current_semester', 1);
+
+  if (!empty($_GET['department'])) $departmentdefault = stripslashes($_GET['department']);
+  else $departmentdefault = 'Arts and Theology';
+
+  if (!empty($_GET['session'])) $sessiondefault = stripslashes($_GET['session']);
+
+  if (!empty($_GET['semester'])) $semesterdefault = stripslashes($_GET['semester']);
+
+  if (!empty($_GET['level'])) $leveldefault = stripslashes($_GET['level']);
+  else $leveldefault = '100';
+
+  $form['department'] = array(
+    '#type' => 'select',
+    '#default_value' => $departmentdefault,
+    '#options' => _grading_department_list(),
+    '#title' => 'Department',
+    '#ahah' =>array(
+      'event'   => 'change',
+      'path'    => 'grading/ahahstats',
+      'wrapper' => 'stats_here',
+      'method'  => 'replace',
+      'effect'  => 'fade'
+      ),
+    '#required' => true
+    );
+
+  $form['session'] = array(
+    '#type' => 'select',
+    '#default_value' => $sessiondefault,
+    '#options' => _grading_session_list(),
+    '#title' => 'Session',
+    '#ahah' =>array(
+      'event'   => 'change',
+      'path'    => 'grading/ahahstats',
+      'wrapper' => 'stats_here',
+      'method'  => 'replace',
+      'effect'  => 'fade'
+      ),
+    '#required' => true
+    );
+
+  $form['semester'] = array(
+    '#type' => 'select',
+    '#default_value' => $semesterdefault,
+    '#options' => _grading_semester_list(),
+    '#title' => 'Semester',
+    '#ahah' =>array(
+      'event'   => 'change',
+      'path'    => 'grading/ahahstats',
+      'wrapper' => 'stats_here',
+      'method'  => 'replace',
+      'effect'  => 'fade'
+      ),
+    '#required' => true
+    );
+
+  $form['level'] = array(
+    '#type' => 'select',
+    '#default_value' => $leveldefault,
+    '#options' => _grading_level_list(),
+    '#title' => 'Level',
+    '#ahah' =>array(
+      'event'   => 'change',
+      'path'    => 'grading/ahahstats',
+      'wrapper' => 'stats_here',
+      'method'  => 'replace',
+      'effect'  => 'fade'
+      ),
+    '#required' => true
+    );
+
+  $form['updatebutton'] = array(
+    '#type' => 'button',
+    '#value' => 'Show Grade Statistics and Approval Status for above selection',
+    '#ahah' => array(
+      'path'    => 'grading/ahahstats',
+      'wrapper' => 'stats_here',
+      'method'  => 'replace',
+      'effect'  => 'fade'
+      )
+    );
+
+  $form['statshere'] = array(
+    '#type' => 'markup',
+    '#prefix' => '<div id="stats_here">',
+    '#value' => ' ',
+    '#suffix' => '</div>',
+    );
+
+  return $form;
+}
+
+
+function _grading_college_list_any() {
+  $names = array();
+  $names['0'] = '<Any>';
+  $sql = "SELECT DISTINCT field_college_name_value AS name FROM {content_type_college} ORDER BY name ASC";
+  $rows = db_query($sql);
+  while ($row = db_fetch_object($rows)) {
+    $names[$row->name] = $row->name;
+  }
+  return $names;
+}
+
+
+function _grading_department_list() {
+  $names = array();
+  $sql = "SELECT DISTINCT field_department_name_value AS name FROM {content_type_department} ORDER BY name ASC";
+  $rows = db_query($sql);
+  while ($row = db_fetch_object($rows)) {
+    $names[$row->name] = $row->name;
+  }
+  return $names;
+}
+
+
+function _grading_department_list_any() {
+  $names = array();
+  $names['0'] = '<Any>';
+  $sql = "SELECT DISTINCT field_department_name_value AS name FROM {content_type_department} ORDER BY name ASC";
+  $rows = db_query($sql);
+  while ($row = db_fetch_object($rows)) {
+    $names[$row->name] = $row->name;
+  }
+  return $names;
+}
+
+
+function _grading_programme_list_any() {
+  $names = array();
+  $names['0'] = '<Any>';
+  $sql = "SELECT DISTINCT field_programme_name_value AS name FROM {content_type_program} ORDER BY name ASC";
+  $rows = db_query($sql);
+  while ($row = db_fetch_object($rows)) {
+    $names[$row->name] = $row->name;
+  }
+  return $names;
+}
+
+
+function _grading_session_list() {
+  $names = array();
+  $sql = "SELECT DISTINCT field_sess_name_value AS name FROM {content_type_course_instance} ORDER BY name ASC";
+  $rows = db_query($sql);
+  while ($row = db_fetch_object($rows)) {
+    $names[$row->name] = $row->name;
+  }
+  return $names;
+}
+
+
+function _grading_semester_list() {
+  $names = array();
+  $sql = "SELECT DISTINCT field_semester_name_value AS name FROM {content_type_course_instance} ORDER BY name ASC";
+  $rows = db_query($sql);
+  while ($row = db_fetch_object($rows)) {
+    $names[$row->name] = $row->name;
+  }
+  return $names;
+}
+
+
+function _grading_level_list() {
+  $names = array();
+  $sql = "SELECT DISTINCT field_level_value AS name FROM {content_type_course} ORDER BY name ASC";
+  $rows = db_query($sql);
+  while ($row = db_fetch_object($rows)) {
+    $names[$row->name] = $row->name;
+  }
+  return $names;
+}
+
+
+function _grading_level_list_any() {
+  $names = array();
+  $names['0'] = '<Any>';
+  $sql = "SELECT DISTINCT field_level_value AS name FROM {content_type_course} ORDER BY name ASC";
+  $rows = db_query($sql);
+  while ($row = db_fetch_object($rows)) {
+    $names[$row->name] = $row->name;
+  }
+  return $names;
+}
+
+
+function grading_stats_department_form_submit($form, &$state) {
+  drupal_set_message('department: ' . $state['values']['department'] . '<br />');
+}
+
+
+function _grading_ahah_stats() {
+  global $user;
+  global $base_url;
+
+  $department = stripslashes($_POST['department']);
+  $level      = stripslashes($_POST['level']);
+  $session    = stripslashes($_POST['session']);
+  $semester   = stripslashes($_POST['semester']);
+
+  $departmentenc = rawurlencode($department);
+  $sessionenc    = rawurlencode($session);
+
+  // Display statistics on exams completed
+  $sql = "SELECT
+    COUNT(*) AS number_students,
+    SUM(fully) AS sumfully,
+    SUM(part) AS sumpart,
+    SUM(none) AS sumnone,
+    MIN(ca1l) AS ca1locked,
+    MIN(ca2l) AS ca2locked,
+    MIN(ca3l) AS ca3locked,
+    MIN(ca4l) AS ca4locked,
+    MIN(examl) AS examlocked
+  FROM
+    (
+      SELECT
+        BIT_AND(sg.field_exam_score_value > 0) AS fully,
+        BIT_OR(sg.field_exam_score_value > 0) AS part,
+        BIT_AND(sg.field_exam_score_value = 0) AS none,
+        MIN(sg.field_ca1locked_value) AS ca1l,
+        MIN(sg.field_ca2locked_value) AS ca2l,
+        MIN(sg.field_ca3locked_value) AS ca3l,
+        MIN(sg.field_ca4locked_value) AS ca4l,
+        MIN(sg.field_examscorelocked_value) AS examl
+      FROM {content_type_student_grades} sg, {content_type_student_gpa} gpa, {content_type_program} p, {content_type_department} d
+      WHERE
+        sg.field_student_gpa_nid=gpa.nid AND
+        sg.field_dropped_value=0 AND
+        gpa.field_level_name_gpa_value='%s' AND
+        gpa.field_sess_name_gpa_value='%s' AND
+        gpa.field_semester_name_gpa_value='%s' AND
+        gpa.field_program_ref_gpa_nid=p.nid AND
+        p.field_department_id_nid=d.nid AND
+        d.field_department_name_value='%s'
+      GROUP BY sg.field_mat_no_uid
+    ) AS eachstudent";
+
+  $summaryrows = db_query($sql, $level, $session, $semester, $department);
+  $summaryrow = db_fetch_object($summaryrows);
+
+  $output = '<br /><table class="body-table"><tbody>';
+
+  $output .= '<tr><th valign="top" class="table-label" colspan="2">DEPARTMENTAL SUMMARY RESULTS</th></tr>';
+
+  $output .= '<tr>';
+  $output .= '<td valign="top" class="table-label">Total No. of Registered Students</td>';
+  $output .= '<td valign="top">' . $summaryrow->number_students . '</td>';
+  $output .= '</tr>';
+
+  $output .= '<tr>';
+  $output .= '<td valign="top" class="table-label">No. of Students that Completed Exams</td>';
+  $output .= '<td valign="top">' . $summaryrow->sumfully . '</td>';
+  $output .= '</tr>';
+
+  $output .= '<tr>';
+  $output .= '<td valign="top" class="table-label">No. of Students that Partially Completed Exams</td>';
+  $output .= '<td valign="top">' . ($summaryrow->sumpart - $summaryrow->sumfully) . '</td>';
+  $output .= '</tr>';
+
+  $output .= '<tr>';
+  $output .= '<td valign="top" class="table-label">Number of Absent Students</td>';
+  $output .= '<td valign="top">' . $summaryrow->sumnone . '</td>';
+  $output .= '</tr>';
+
+  $sql = "SELECT
+      p.field_programme_name_value AS programme,
+      MIN(sg.field_ca1locked_value) AS ca1l,
+      MIN(sg.field_ca2locked_value) AS ca2l,
+      MIN(sg.field_ca3locked_value) AS ca3l,
+      MIN(sg.field_ca4locked_value) AS ca4l,
+      MIN(sg.field_examscorelocked_value) AS examl
+    FROM {content_type_student_grades sg}, {content_type_student_gpa} gpa, {content_type_program} p, {content_type_department} d
+    WHERE
+      sg.field_student_gpa_nid=gpa.nid AND
+      sg.field_dropped_value=0 AND
+      gpa.field_level_name_gpa_value='%s' AND
+      gpa.field_sess_name_gpa_value='%s' AND
+      gpa.field_semester_name_gpa_value='%s' AND
+      gpa.field_program_ref_gpa_nid=p.nid AND
+      p.field_department_id_nid=d.nid AND
+      d.field_department_name_value='%s'
+    GROUP BY p.field_programme_name_value ORDER BY p.field_programme_name_value";
+  $programmerows = db_query($sql, $level, $session, $semester, $department);
+  $first = true;
+  while ($programmerow = db_fetch_object($programmerows)) {
+    if ($first) {
+      $output .= '<tr><td colspan="2"><br /></td></tr>';
+      $output .= '<tr><td colspan="2">View Programme Details...</td></tr>';
+      $first = false;
+    }
+    $programmeenc = rawurlencode($programmerow->programme);
+    $output .= '<tr>';
+    $output .= '<td><a href="' . $base_url . "/gpa?programme={$programmeenc}&level={$level}&session={$sessionenc}&semester={$semester}" . '">' . $programmerow->programme . '</a></td><td>';
+    //if     ($programmerow->ca1l  == 1) $output .= 'Continuous Assessment 1 Ready for Approval by HOD';
+    //elseif ($programmerow->ca2l  == 1) $output .= 'Continuous Assessment 2 Ready for Approval by HOD';
+    //elseif ($programmerow->ca3l  == 1) $output .= 'Continuous Assessment 3 Ready for Approval by HOD';
+    //elseif ($programmerow->ca4l  == 1) $output .= 'Continuous Assessment 4 Ready for Approval by HOD';
+    if ($programmerow->examl == 1) $output .= 'All Lecturers have Submitted Semester Exam Results';
+    //elseif ($programmerow->ca1l  == 0) $output .= 'Waiting on some Lecturer Submissions for Continuous Assessment 1';
+    //elseif ($programmerow->ca2l  == 0) $output .= 'Waiting on some Lecturer Submissions for Continuous Assessment 2';
+    //elseif ($programmerow->ca3l  == 0) $output .= 'Waiting on some Lecturer Submissions for Continuous Assessment 3';
+    //elseif ($programmerow->ca4l  == 0) $output .= 'Waiting on some Lecturer Submissions for Continuous Assessment 4';
+    elseif ($programmerow->examl == 0) $output .= 'Waiting on some Lecturer Submissions for Semester Exam';
+    elseif ($programmerow->examl == 2) $output .= 'All Departments have Approved Semester Exam Results';
+    elseif ($programmerow->examl == 3) $output .= 'All Faculties have Approved Semester Exam Results';
+    elseif ($programmerow->examl == 4) $output .= 'Registrar has Approved Semester Exam Results';
+    else $output .= 'Semester Exam Results Fully Approved';
+    $output .= '</td></tr>';
+  }
+
+  $output .= '<tr><td colspan="2"><br /></td></tr>';
+  $output .= '<tr><td colspan="2">Departmental Grading Approval Status...</td></tr>';
+
+  // Find Registrar uid
+  $inroles = "'Registrar', 'University Examination Officer'";
+
+  $sql = "SELECT uid AS registrar_uid
+    FROM {eduerp_roles}
+    WHERE role IN ($inroles)";
+  $registrarresult = db_query($sql);
+  $registrar_uid = '';
+  while ($registrar = db_fetch_object($registrarresult)) {
+    if ($registrar_uid === '') $registrar_uid = $registrar->registrar_uid;
+    else $registrar_uid = $registrar_uid . ',' . $registrar->registrar_uid;
+  }
+  if (empty($registrar_uid)) $registrar_uid = 0;
+
+  // Find VC uid
+  $inroles = "'Vice-Chancellor', 'University Examination Officer'";
+
+  $sql = "SELECT uid AS vc_uid
+    FROM {eduerp_roles}
+    WHERE role IN ($inroles)";
+  $vcresult = db_query($sql);
+  $vc_uid = '';
+  while ($vc = db_fetch_object($vcresult)) {
+    if ($vc_uid === '') $vc_uid = $vc->vc_uid;
+    else $vc_uid = $vc_uid . ',' . $vc->vc_uid;
+  }
+  if (empty($vc_uid)) $vc_uid = 0;
+
+  $showregistrarform = false;
+  $showvcform = false;
+
+  $output .= '<tr><td colspan="2"></td></tr>';
+
+  if ($summaryrow->examlocked == 0) {
+    $output .= '<tr><td colspan="2">Waiting on some Lecturer Submissions for Semester Exam</td></tr>';
+  }
+  elseif ($summaryrow->examlocked == 1) {
+    $output .= '<tr><td colspan="2">All Lecturers have Submitted Semester Exam Results</td></tr>';
+  }
+  elseif ($summaryrow->examlocked == 2) {
+    $output .= '<tr><td colspan="2">All Departments have Approved Semester Exam Results</td></tr>';
+  }
+  elseif ($summaryrow->examlocked == 3 && variable_get('RegistrarApprovesGrades', 0)) {
+    $registrar_uid_array = explode(',', $registrar_uid);
+    if (in_array($user->uid, $registrar_uid_array)) {
+      $showregistrarform = true;
+
+      $_SESSION['eduerpregistrarapprovalform']->department_url = $base_url . "/grading/stats?department={$departmentenc}&level={$level}&session={$sessionenc}&semester={$semester}";
+      $_SESSION['eduerpregistrarapprovalform']->registrar_uid = $registrar_uid;
+      $_SESSION['eduerpregistrarapprovalform']->vc_uid = $vc_uid;
+      $_SESSION['eduerpregistrarapprovalform']->department = $department;
+      $_SESSION['eduerpregistrarapprovalform']->level = $level;
+      $_SESSION['eduerpregistrarapprovalform']->session = $session;
+      $_SESSION['eduerpregistrarapprovalform']->semester = $semester;
+      $_SESSION['eduerpregistrarapprovalform']->gradestext = 'Semester Exam';
+      $_SESSION['eduerpregistrarapprovalform']->fieldtoapprove = 'field_examscorelocked_value';
+    }
+    else {
+      $output .= '<tr><td colspan="2">All Faculties have Approved Semester Exam Results</td></tr>';
+    }
+  }
+  elseif ($summaryrow->examlocked == 4 || $summaryrow->examlocked == 3) {
+    $vc_uid_array = explode(',', $vc_uid);
+    if (in_array($user->uid, $vc_uid_array)) {
+      $showvcform = true;
+
+      $_SESSION['eduerpvcapprovalform']->department_url = $base_url . "/grading/stats?department={$departmentenc}&level={$level}&session={$sessionenc}&semester={$semester}";
+      $_SESSION['eduerpvcapprovalform']->vc_uid = $vc_uid;
+      $_SESSION['eduerpvcapprovalform']->department = $department;
+      $_SESSION['eduerpvcapprovalform']->level = $level;
+      $_SESSION['eduerpvcapprovalform']->session = $session;
+      $_SESSION['eduerpvcapprovalform']->semester = $semester;
+      $_SESSION['eduerpvcapprovalform']->gradestext = 'Semester Exam';
+      $_SESSION['eduerpvcapprovalform']->fieldtoapprove = 'field_examscorelocked_value';
+    }
+    else {
+      if (variable_get('RegistrarApprovesGrades', 0)) {
+        $output .= '<tr><td colspan="2">Registrar has Approved Semester Exam Results</td></tr>';
+      }
+      else {
+        $output .= '<tr><td colspan="2">All Faculties have Approved Semester Exam Results</td></tr>';
+      }
+    }
+  }
+  elseif ($summaryrow->examlocked == 5) {
+    $output .= '<tr><td colspan="2">Semester Exam Results Fully Approved</td></tr>';
+  }
+
+  $output .= '</tbody></table>';
+
+  if (empty($registrar_uid) && variable_get('RegistrarApprovesGrades', 0)) {
+    $output .= 'THERE IS NO REGISTRAR, ONE MUST BE ASSIGNED';
+  }
+  elseif (empty($vc_uid)) {
+    $output .= 'THERE IS NO VICE CHANCELLOR, ONE MUST BE ASSIGNED';
+  }
+  elseif ($showregistrarform) {
+    // $output .= drupal_get_form('approve_grades_registrar_form');
+    $output .= '<a href="' . $base_url . '/grading/eduerpregistrarapprovalform">Click here to go to a Form for Approval of ' . $_SESSION['eduerpregistrarapprovalform']->gradestext . " for level $level</a>";
+  }
+  elseif ($showvcform) {
+    // $output .= drupal_get_form('approve_grades_vc_form');
+    $output .= '<a href="' . $base_url . '/grading/eduerpvcapprovalform">Click here to go to a Form for Approval of ' . $_SESSION['eduerpvcapprovalform']->gradestext . " for level $level</a>";
+  }
+
+
+  $output .= '<br /><br /><table class="body-table"><tbody>';
+
+  $output .= '<tr><th valign="top" class="table-label" colspan="8">Approval Details for all Courses taken by Students in this Department...</th></tr>';
+
+  $output .= '<td valign="top" class="table-label">Course URL</td>';
+  $output .= '<td valign="top" class="table-label">Student' . "'s Programme</td>";
+  //$output .= '<td valign="top" class="table-label">Student' . "'s Department</td>"; // All will point to current screen in any case!
+  $output .= '<td valign="top" class="table-label">Continuous Assessment 1</td>';
+  $output .= '<td valign="top" class="table-label">Continuous Assessment 2</td>';
+  $output .= '<td valign="top" class="table-label">Continuous Assessment 3</td>';
+  $output .= '<td valign="top" class="table-label">Continuous Assessment 4</td>';
+  $output .= '<td valign="top" class="table-label">Semester Exam</td>';
+
+  $sql = "SELECT
+      c.field_code_value AS coursecode,
+      p.field_programme_name_value AS programme,
+      MIN(sg.field_ca1locked_value) AS ca1l,
+      MIN(sg.field_ca2locked_value) AS ca2l,
+      MIN(sg.field_ca3locked_value) AS ca3l,
+      MIN(sg.field_ca4locked_value) AS ca4l,
+      MIN(sg.field_examscorelocked_value) AS examl
+    FROM {content_type_student_grades sg}, {content_type_course_instance} ci, {content_type_course} c, {content_type_student_gpa} gpa, {content_type_program} p, {content_type_department} d
+    WHERE
+      sg.field_student_gpa_nid=gpa.nid AND
+      sg.field_dropped_value=0 AND
+      sg.field_course_instance_nid=ci.nid AND
+      ci.field_course_id_nid=c.nid AND
+      gpa.field_level_name_gpa_value='%s' AND
+      gpa.field_sess_name_gpa_value='%s' AND
+      gpa.field_semester_name_gpa_value='%s' AND
+      gpa.field_program_ref_gpa_nid=p.nid AND
+      p.field_department_id_nid=d.nid AND
+      d.field_department_name_value='%s'
+    GROUP BY c.field_code_value, p.field_programme_name_value ORDER BY c.field_code_value, p.field_programme_name_value";
+  $courserows = db_query($sql, $level, $session, $semester, $department);
+  while ($courserow = db_fetch_object($courserows)) {
+
+    // Determine how CA should be treated (it might be possible to integrate this in the query above)
+    $sql = "SELECT cgw.number_of_ca, cgw.ca_approved_onebyone
+      FROM {course_grade_weightings} cgw, {content_type_course} c
+      WHERE
+        (cgw.course_id=c.nid OR cgw.course_id=0) AND
+        c.field_code_value='%s'
+      ORDER BY cgw.course_id DESC";  // Select the course specific one (if any) first followed by the default one
+    $weightings = db_query($sql, $courserow->coursecode);
+    $row = db_fetch_object($weightings);
+    $number_of_ca = $row->number_of_ca;
+    $ca_approved_onebyone = $row->ca_approved_onebyone;
+
+    $output .= '<tr>';
+
+    $coursecodeenc = rawurlencode($courserow->coursecode);
+    $programmeenc = rawurlencode($courserow->programme);
+    $departmentenc = rawurlencode($courserow->department);
+
+    $output .= '<td><a href="' . $base_url . "/course?coursecode={$coursecodeenc}&session={$sessionenc}&semester={$semester}&location=All" . '">' . $courserow->coursecode . '</a></td>';
+    //$output .= '<td>' . $courserow->programme . '</td>';
+    //$output .= '<td>' . $courserow->department . '</td>';
+    $output .= '<td><a href="' . $base_url . "/gpa?programme={$programmeenc}&level={$level}&session={$sessionenc}&semester={$semester}" . '">' . $courserow->programme . '</a></td>';
+    //$output .= '<td><a href="' . $base_url . "/grading/stats?department={$departmentenc}&level={$level}&session={$sessionenc}&semester={$semester}" . '">' . $courserow->department . '</a></td>';
+
+    $approvals = array('Lecturers need to Submit', 'Submitted by Lecturers', 'Approved by Department', 'Approved by Faculty', 'Approved by Registrar', 'Fully Approved');
+    if ($ca_approved_onebyone && $number_of_ca >= 1) {
+      $output .= '<td>' . $approvals[$courserow->ca1l] . '</td>';
+    }
+    else {
+      $output .= '<td></td>';
+    }
+    if ($ca_approved_onebyone && $number_of_ca >= 2) {
+      $output .= '<td>' . $approvals[$courserow->ca2l] . '</td>';
+    }
+    else {
+      $output .= '<td></td>';
+    }
+    if ($ca_approved_onebyone && $number_of_ca >= 3) {
+      $output .= '<td>' . $approvals[$courserow->ca3l] . '</td>';
+    }
+    else {
+      $output .= '<td></td>';
+    }
+    if ($ca_approved_onebyone && $number_of_ca >= 4) {
+      $output .= '<td>' . $approvals[$courserow->ca4l] . '</td>';
+    }
+    else {
+      $output .= '<td></td>';
+    }
+    $output .= '<td>' . $approvals[$courserow->examl] . '</td>';
+
+    $output .= '</tr>';
+  }
+
+  $output .= '</tbody></table>';
+
+  print drupal_to_js(array('data' => $output, 'status' => true));
+
+  exit();
+}
+
+
+// Put up form to allow Registrar to approve grades (relevant locked fields will then become 4 (1 is lecturer approval, 2 is HOD approval, 3 is Dean approval)).
+
+function approve_grades_registrar_form($form_state) {
+  $form['departmentname'] = array('#value' => '<b>Department: ' . $_SESSION['eduerpregistrarapprovalform']->department . '</b>');
+
+  $form['comment'] = array(
+    '#type' => 'textarea',
+    '#title' => 'Enter a comment on the grades for the Vice Chancellor',
+    '#cols' => 80,
+    '#rows' => 5,
+    '#required' => TRUE
+  );
+
+  $form['department_url'] = array('#type' => 'value', '#value' => $_SESSION['eduerpregistrarapprovalform']->department_url);
+  $form['registrar_uid'] = array('#type' => 'value', '#value' => $_SESSION['eduerpregistrarapprovalform']->registrar_uid);
+  $form['vc_uid'] = array('#type' => 'value', '#value' => $_SESSION['eduerpregistrarapprovalform']->vc_uid);
+  $form['department'] = array('#type' => 'value', '#value' => $_SESSION['eduerpregistrarapprovalform']->department);
+  $form['level'] = array('#type' => 'value', '#value' => $_SESSION['eduerpregistrarapprovalform']->level);
+  $form['session'] = array('#type' => 'value', '#value' => $_SESSION['eduerpregistrarapprovalform']->session);
+  $form['semester'] = array('#type' => 'value', '#value' => $_SESSION['eduerpregistrarapprovalform']->semester);
+  $form['fieldtoapprove'] = array('#type' => 'value', '#value' => $_SESSION['eduerpregistrarapprovalform']->fieldtoapprove);
+  $form['gradestext'] = array('#type' => 'value', '#value' => $_SESSION['eduerpregistrarapprovalform']->gradestext);
+
+  $form['submit'] = array('#type' => 'submit', '#value' => 'Approve ' . $_SESSION['eduerpregistrarapprovalform']->gradestext . ' for level ' . $_SESSION['eduerpregistrarapprovalform']->level);
+
+  return $form;
+}
+
+
+function approve_grades_registrar_form_validate($form, &$form_state) {
+  if (empty($form_state['values']['comment'])) {
+    form_set_error('comment', 'You must enter a comment for the Vice Chancellor!');
+  }
+}
+
+
+function approve_grades_registrar_form_submit($form, &$form_state) {
+  global $user;
+
+  $department     = $form_state['values']['department'];
+  $level          = $form_state['values']['level'];
+  $session        = $form_state['values']['session'];
+  $semester       = $form_state['values']['semester'];
+  $fieldtoapprove = $form_state['values']['fieldtoapprove'];
+  $comment        = $form_state['values']['comment'];
+  $department_url = $form_state['values']['department_url'];
+  $registrar_uid  = $form_state['values']['registrar_uid'];
+  $vc_uid         = $form_state['values']['vc_uid'];
+  $gradestext     = $form_state['values']['gradestext'];
+
+  // Don't allow an exam score approved by the VC to be changed
+  $protectVC = 'AND sg.field_examscorelocked_value < 5';
+
+  // Approve any CAs along with exam (if approved one by one, this might set a CA 5 to a 4, but this should not be a serious issue)
+  $setstatement = "SET
+    sg.`field_ca1locked_value`='4',
+    sg.`field_ca2locked_value`='4',
+    sg.`field_ca3locked_value`='4',
+    sg.`field_ca4locked_value`='4',
+    sg.`field_examscorelocked_value`='4'";
+
+  $sql = "UPDATE {content_type_student_grades} sg, {content_type_student_gpa} gpa, {content_type_program} p, {content_type_department} d
+    $setstatement
+    WHERE
+      sg.field_student_gpa_nid=gpa.nid AND
+      sg.field_dropped_value=0 AND
+      gpa.field_level_name_gpa_value='%s' AND
+      gpa.field_sess_name_gpa_value='%s' AND
+      gpa.field_semester_name_gpa_value='%s' AND
+      gpa.field_program_ref_gpa_nid=p.nid AND
+      p.field_department_id_nid=d.nid AND
+      d.field_department_name_value='%s'
+      $protectVC";
+  db_query($sql, $level, $session, $semester, $department);
+  cache_clear_all('content:', content_cache_tablename(), TRUE);
+
+  $sql = "SELECT co.field_college_name_value AS college
+    FROM {content_type_department} d, {content_type_college} co
+    WHERE d.field_department_name_value='%s' AND d.field_college_id_nid=co.nid
+    LIMIT 1";
+  $collegeresult = db_query($sql, $department);
+  if ($collegerow = db_fetch_object($collegeresult)) {
+    $college = $collegerow->college;
+  }
+  else {
+    $college = '';
+  }
+
+  $user_profile = new UserProfile($user->uid);
+
+  $name = '';
+  if (!empty($user_profile->profile_first_name) && !empty($user_profile->profile_last_name)) {
+    $middle = '';
+    if (!empty($user_profile->profile_middle_name)) $middle = $user_profile->profile_middle_name . ' ';
+    $name = "$user_profile->profile_first_name {$middle}$user_profile->profile_last_name";
+  }
+
+  $firsttime = TRUE;
+  $vc_uid_array = explode(',', $vc_uid);
+  foreach ($vc_uid_array as $vc_uid_i) {
+
+    if (!empty($vc_uid_i)) {
+      $destination_user = user_load($vc_uid_i);
+      $user_profile = new UserProfile($vc_uid_i);
+    }
+    else {
+      $destination_user = NULL;
+      $user_profile = NULL;
+    }
+
+    $subject = "$gradestext for $department/$level/$session/$semester Approved by $name";
+
+    $body = '';
+    if (!empty($user_profile->profile_first_name) && !empty($user_profile->profile_last_name)) {
+      $middle = '';
+      if (!empty($user_profile->profile_middle_name)) $middle = $user_profile->profile_middle_name . ' ';
+      $body .= "Dear $user_profile->profile_first_name {$middle}$user_profile->profile_last_name,\n\n";
+    }
+
+    $body .= "I have approved $gradestext\n\n";
+    $body .= "URL: $department_url\n";
+    $body .= "Department: $department\n";
+    $body .= "Faculty: $college\n";
+    $body .= "Level: $level\n";
+    $body .= "Session: $session\n";
+    $body .= "semester: $semester\n\n";
+    $body .= "Registrar's comment...\n";
+    $body .= str_replace('<br />', "\n", $comment);
+    $body .= "\n\n{$name}\n";
+
+    if ($firsttime) {
+      $node = new stdClass();
+      $node->type                            = 'approval';
+      $node->uid                             = 1;
+      $node->status                          = 1;
+      $node->promote                         = 0;
+      $node->sticky                          = 0;
+      $node->comment                         = 0;
+      $node->title                           = $subject;
+      $node->body                            = $comment;
+      $node->field_url[0]['value']           = $department_url;
+      $node->field_approver[0]['uid']        = $user->uid;
+      $node->field_destination[0]['value']   = $vc_uid;
+      $node->field_department1[0]['value']   = $department;
+      $node->field_college1[0]['value']      = $college;
+      $node->field_level1[0]['value']        = $level;
+      $node->field_session1[0]['value']      = $session;
+      $node->field_semester1[0]['value']     = $semester;
+      $node->field_location1[0]['value']     = '';
+      $node->field_what_approved[0]['value'] = $gradestext;
+      $node->field_action[0]['value']        = 'Approved by Registrar';
+      node_save($node);
+
+      $firsttime = FALSE;
+    }
+
+    if (!empty($destination_user)) {
+      $message = drupal_mail('grading', 'approval', $destination_user->mail, language_default(), array(), $user->mail, FALSE);
+      $message['subject'] = $subject;
+      $message['body'] = $body;
+      drupal_mail_send($message);
+    }
+  }
+
+  drupal_set_message('Approval Successfull');
+  $_SESSION['eduerpregistrarapprovalform'] = NULL; // Just in case they somehow come back to the form
+
+  $departmentenc = rawurlencode($department);
+  $sessionenc = rawurlencode($session);
+  drupal_goto('grading/stats', "department={$departmentenc}&level={$level}&session={$sessionenc}&semester={$semester}");
+}
+
+
+// Put up form to allow VC to approve grades (relevant locked fields will then become 5)
+// Also set the student visible exam score to the values set by the lecturer
+
+function approve_grades_vc_form($form_state) {
+  $form['departmentname'] = array('#value' => '<b>Department: ' . $_SESSION['eduerpvcapprovalform']->department . '</b>');
+
+  $form['comment'] = array(
+    '#type' => 'textarea',
+    '#title' => 'Enter a comment on the grades for the Record',
+    '#cols' => 80,
+    '#rows' => 5,
+    '#required' => TRUE
+  );
+
+  $form['department_url'] = array('#type' => 'value', '#value' => $_SESSION['eduerpvcapprovalform']->department_url);
+  $form['vc_uid'] = array('#type' => 'value', '#value' => $_SESSION['eduerpvcapprovalform']->vc_uid);
+  $form['department'] = array('#type' => 'value', '#value' => $_SESSION['eduerpvcapprovalform']->department);
+  $form['level'] = array('#type' => 'value', '#value' => $_SESSION['eduerpvcapprovalform']->level);
+  $form['session'] = array('#type' => 'value', '#value' => $_SESSION['eduerpvcapprovalform']->session);
+  $form['semester'] = array('#type' => 'value', '#value' => $_SESSION['eduerpvcapprovalform']->semester);
+  $form['fieldtoapprove'] = array('#type' => 'value', '#value' => $_SESSION['eduerpvcapprovalform']->fieldtoapprove);
+  $form['gradestext'] = array('#type' => 'value', '#value' => $_SESSION['eduerpvcapprovalform']->gradestext);
+
+  $form['submit'] = array('#type' => 'submit', '#value' => 'Approve ' . $_SESSION['eduerpvcapprovalform']->gradestext . ' for level ' . $_SESSION['eduerpvcapprovalform']->level);
+
+  return $form;
+}
+
+
+function approve_grades_vc_form_validate($form, &$form_state) {
+  if (empty($form_state['values']['comment'])) {
+    form_set_error('comment', 'You must enter a comment for the Record!');
+  }
+}
+
+
+function approve_grades_vc_form_submit($form, &$form_state) {
+  global $user;
+
+  $department     = $form_state['values']['department'];
+  $level          = $form_state['values']['level'];
+  $session        = $form_state['values']['session'];
+  $semester       = $form_state['values']['semester'];
+  $fieldtoapprove = $form_state['values']['fieldtoapprove'];
+  $comment        = $form_state['values']['comment'];
+  $department_url = $form_state['values']['department_url'];
+  $vc_uid         = $form_state['values']['vc_uid'];
+  $gradestext     = $form_state['values']['gradestext'];
+
+  // Approve any CAs along with exam
+  $setstatement = "SET
+    sg.`field_ca1locked_value`='5',
+    sg.`field_ca2locked_value`='5',
+    sg.`field_ca3locked_value`='5',
+    sg.`field_ca4locked_value`='5',
+    sg.`field_examscorelocked_value`='5',
+    sg.`field_examscoreforstudent_value`=sg.`field_exam_score_value`,
+    sg.`field_ca1forstudent_value`=sg.`field_ca1_value`,
+    sg.`field_ca2forstudent_value`=sg.`field_ca2_value`,
+    sg.`field_ca3forstudent_value`=sg.`field_ca3_value`,
+    sg.`field_ca4forstudent_value`=sg.`field_ca4_value`,
+    sg.`field_totalscoreforstudent_value`=sg.`field_total_score_value`,
+    sg.`field_gradepointforstudent_value`=sg.`field_gradepoint_value`,
+    sg.`field_gradeforstudent_value`=sg.`field_grade_value`";
+
+  $sql = "UPDATE {content_type_student_grades} sg, {content_type_student_gpa} gpa, {content_type_program} p, {content_type_department} d
+    $setstatement
+    WHERE
+      sg.field_student_gpa_nid=gpa.nid AND
+      sg.field_dropped_value=0 AND
+      gpa.field_level_name_gpa_value='%s' AND
+      gpa.field_sess_name_gpa_value='%s' AND
+      gpa.field_semester_name_gpa_value='%s' AND
+      gpa.field_program_ref_gpa_nid=p.nid AND
+      p.field_department_id_nid=d.nid AND
+      d.field_department_name_value='%s'";
+  db_query($sql, $level, $session, $semester, $department);
+  cache_clear_all('content:', content_cache_tablename(), TRUE);
+
+  $sql = "UPDATE {content_type_student_gpa} gpa, {content_type_student_program} sp, {content_type_program} p, {content_type_department} d
+    SET
+      gpa.`field_gpaforstudent_value`=gpa.`field_gpa_value`,
+      sp.`field_cgpaforstudent_sp_value`=sp.`field_cgpa_sp_value`
+    WHERE
+      gpa.field_level_name_gpa_value='%s' AND
+      gpa.field_sess_name_gpa_value='%s' AND
+      gpa.field_semester_name_gpa_value='%s' AND
+      gpa.field_program_ref_gpa_nid=p.nid AND
+      gpa.field_student_program_ref_gpa_nid=sp.nid AND
+      p.field_department_id_nid=d.nid AND
+      d.field_department_name_value='%s'";
+  db_query($sql, $level, $session, $semester, $department);
+  cache_clear_all('content:', content_cache_tablename(), TRUE);
+
+  $sql = "SELECT co.field_college_name_value AS college
+    FROM {content_type_department} d, {content_type_college} co
+    WHERE d.field_department_name_value='%s' AND d.field_college_id_nid=co.nid
+    LIMIT 1";
+  $collegeresult = db_query($sql, $department);
+  if ($collegerow = db_fetch_object($collegeresult)) {
+    $college = $collegerow->college;
+  }
+  else {
+    $college = '';
+  }
+
+  $user_profile = new UserProfile($user->uid);
+
+  $name = '';
+  if (!empty($user_profile->profile_first_name) && !empty($user_profile->profile_last_name)) {
+    $middle = '';
+    if (!empty($user_profile->profile_middle_name)) $middle = $user_profile->profile_middle_name . ' ';
+    $name = "$user_profile->profile_first_name {$middle}$user_profile->profile_last_name";
+  }
+
+  $subject = "$gradestext for $department/$level/$session/$semester Approved by $name";
+
+  $node = new stdClass();
+  $node->type                            = 'approval';
+  $node->uid                             = 1;
+  $node->status                          = 1;
+  $node->promote                         = 0;
+  $node->sticky                          = 0;
+  $node->comment                         = 0;
+  $node->title                           = $subject;
+  $node->body                            = $comment;
+  $node->field_url[0]['value']           = $department_url;
+  $node->field_approver[0]['uid']        = $user->uid;
+  $node->field_department1[0]['value']   = $department;
+  $node->field_college1[0]['value']      = $college;
+  $node->field_level1[0]['value']        = $level;
+  $node->field_session1[0]['value']      = $session;
+  $node->field_semester1[0]['value']     = $semester;
+  $node->field_location1[0]['value']     = '';
+  $node->field_what_approved[0]['value'] = $gradestext;
+  $node->field_action[0]['value']        = 'Approved by VC';
+  node_save($node);
+
+  // Queue e-mails for Students
+  $sql = "SELECT field_student_ref_gpa_uid FROM {content_type_student_gpa} gpa, {content_type_program} p, {content_type_department} d
+    WHERE
+      gpa.field_level_name_gpa_value='%s' AND
+      gpa.field_sess_name_gpa_value='%s' AND
+      gpa.field_semester_name_gpa_value='%s' AND
+      gpa.field_program_ref_gpa_nid=p.nid AND
+      p.field_department_id_nid=d.nid AND
+      d.field_department_name_value='%s'";
+  $studentresult = db_query($sql, $level, $session, $semester, $department);
+  while ($student = db_fetch_object($studentresult)) {
+    $student_uid = $student->field_student_ref_gpa_uid;
+
+    db_query("INSERT INTO cron_notification (approver_uid, student_uid, gradestext, programme, instruction) VALUES (%d, %d, '%s', '%s', %d)",
+      $user->uid, $student_uid, $gradestext, $department, 3);
+  }
+
+
+  // Make student_grades node viewable to those with permission 'departmentapproved' for this department
+  $sql = "INSERT IGNORE INTO {node_access}
+    SELECT sg.nid, d.nid AS gid, 'departmentapproved' AS realm, 1 AS grant_view, 0 AS grant_update, 0 AS grant_delete
+    FROM {content_type_student_grades} sg, {content_type_student_gpa} gpa, {content_type_program} p, {content_type_department} d
+    WHERE
+      sg.field_student_gpa_nid=gpa.nid AND
+      gpa.field_level_name_gpa_value='%s' AND
+      gpa.field_sess_name_gpa_value='%s' AND
+      gpa.field_semester_name_gpa_value='%s' AND
+      gpa.field_program_ref_gpa_nid=p.nid AND
+      p.field_department_id_nid=d.nid AND
+      d.field_department_name_value='%s'";
+  db_query($sql, $level, $session, $semester, $department);
+
+  // Make student_grades node viewable to those with permission 'departmentapproved' for the department that owns the course (external course from a different department)
+  // != used to avoid some duplicates
+  $sql = "INSERT IGNORE INTO {node_access}
+    SELECT sg.nid, d_course.nid AS gid, 'departmentapproved' AS realm, 1 AS grant_view, 0 AS grant_update, 0 AS grant_delete
+    FROM
+      {content_type_student_grades} sg,
+      {content_type_student_gpa} gpa,
+      {content_type_program} p,
+      {content_type_department} d,
+      {content_type_course_instance} ci,
+      {content_type_course} c,
+      {content_type_department} d_course
+    WHERE
+      sg.field_student_gpa_nid=gpa.nid AND
+      gpa.field_level_name_gpa_value='%s' AND
+      gpa.field_sess_name_gpa_value='%s' AND
+      gpa.field_semester_name_gpa_value='%s' AND
+      gpa.field_program_ref_gpa_nid=p.nid AND
+      p.field_department_id_nid=d.nid AND
+      d.field_department_name_value='%s' AND
+      sg.field_course_instance_nid=ci.nid AND
+      ci.field_course_id_nid=c.nid AND
+      c.field_department_nid_nid=d_course.nid AND
+      d.nid!=d_course.nid";
+  db_query($sql, $level, $session, $semester, $department);
+
+  // Make student_grades node viewable to those with permission 'collegeapproved' for this college
+  $sql = "INSERT IGNORE INTO {node_access}
+    SELECT sg.nid, d.field_college_id_nid AS gid, 'collegeapproved' AS realm, 1 AS grant_view, 0 AS grant_update, 0 AS grant_delete
+    FROM {content_type_student_grades} sg, {content_type_student_gpa} gpa, {content_type_program} p, {content_type_department} d
+    WHERE
+      sg.field_student_gpa_nid=gpa.nid AND
+      gpa.field_level_name_gpa_value='%s' AND
+      gpa.field_sess_name_gpa_value='%s' AND
+      gpa.field_semester_name_gpa_value='%s' AND
+      gpa.field_program_ref_gpa_nid=p.nid AND
+      p.field_department_id_nid=d.nid AND
+      d.field_department_name_value='%s'";
+  db_query($sql, $level, $session, $semester, $department);
+
+  // Make student_grades node viewable to those with permission 'collegeapproved' for the college that owns the course (external course from a different college)
+  // != used to avoid some duplicates
+  $sql = "INSERT IGNORE INTO {node_access}
+    SELECT sg.nid, d_course.field_college_id_nid AS gid, 'collegeapproved' AS realm, 1 AS grant_view, 0 AS grant_update, 0 AS grant_delete
+    FROM
+      {content_type_student_grades} sg,
+      {content_type_student_gpa} gpa,
+      {content_type_program} p,
+      {content_type_department} d,
+      {content_type_course_instance} ci,
+      {content_type_course} c,
+      {content_type_department} d_course
+    WHERE
+      sg.field_student_gpa_nid=gpa.nid AND
+      gpa.field_level_name_gpa_value='%s' AND
+      gpa.field_sess_name_gpa_value='%s' AND
+      gpa.field_semester_name_gpa_value='%s' AND
+      gpa.field_program_ref_gpa_nid=p.nid AND
+      p.field_department_id_nid=d.nid AND
+      d.field_department_name_value='%s' AND
+      sg.field_course_instance_nid=ci.nid AND
+      ci.field_course_id_nid=c.nid AND
+      c.field_department_nid_nid=d_course.nid AND
+      d.field_college_id_nid!=d_course.field_college_id_nid";
+  db_query($sql, $level, $session, $semester, $department);
+
+  // Make student_grades node viewable to those with permission 'universityapproved'
+  $sql = "INSERT IGNORE INTO {node_access}
+    SELECT sg.nid, 0 AS gid, 'universityapproved' AS realm, 1 AS grant_view, 0 AS grant_update, 0 AS grant_delete
+    FROM {content_type_student_grades} sg, {content_type_student_gpa} gpa, {content_type_program} p, {content_type_department} d
+    WHERE
+      sg.field_student_gpa_nid=gpa.nid AND
+      gpa.field_level_name_gpa_value='%s' AND
+      gpa.field_sess_name_gpa_value='%s' AND
+      gpa.field_semester_name_gpa_value='%s' AND
+      gpa.field_program_ref_gpa_nid=p.nid AND
+      p.field_department_id_nid=d.nid AND
+      d.field_department_name_value='%s'";
+  db_query($sql, $level, $session, $semester, $department);
+
+  // Make student_gpa node viewable to those with permission 'departmentapproved' for this department
+  $sql = "INSERT IGNORE INTO {node_access}
+    SELECT gpa.nid, d.nid AS gid, 'departmentapproved' AS realm, 1 AS grant_view, 0 AS grant_update, 0 AS grant_delete
+    FROM {content_type_student_gpa} gpa, {content_type_program} p, {content_type_department} d
+    WHERE
+      gpa.field_level_name_gpa_value='%s' AND
+      gpa.field_sess_name_gpa_value='%s' AND
+      gpa.field_semester_name_gpa_value='%s' AND
+      gpa.field_program_ref_gpa_nid=p.nid AND
+      p.field_department_id_nid=d.nid AND
+      d.field_department_name_value='%s'";
+  db_query($sql, $level, $session, $semester, $department);
+
+  // Make student_gpa node viewable to those with permission 'collegeapproved' for this college
+  $sql = "INSERT IGNORE INTO {node_access}
+    SELECT gpa.nid, d.field_college_id_nid AS gid, 'collegeapproved' AS realm, 1 AS grant_view, 0 AS grant_update, 0 AS grant_delete
+    FROM {content_type_student_gpa} gpa, {content_type_program} p, {content_type_department} d
+    WHERE
+      gpa.field_level_name_gpa_value='%s' AND
+      gpa.field_sess_name_gpa_value='%s' AND
+      gpa.field_semester_name_gpa_value='%s' AND
+      gpa.field_program_ref_gpa_nid=p.nid AND
+      p.field_department_id_nid=d.nid AND
+      d.field_department_name_value='%s'";
+  db_query($sql, $level, $session, $semester, $department);
+
+  // Make student_gpa node viewable to those with permission 'universityapproved'
+  $sql = "INSERT IGNORE INTO {node_access}
+    SELECT gpa.nid, 0 AS gid, 'universityapproved' AS realm, 1 AS grant_view, 0 AS grant_update, 0 AS grant_delete
+    FROM {content_type_student_gpa} gpa, {content_type_program} p, {content_type_department} d
+    WHERE
+      gpa.field_level_name_gpa_value='%s' AND
+      gpa.field_sess_name_gpa_value='%s' AND
+      gpa.field_semester_name_gpa_value='%s' AND
+      gpa.field_program_ref_gpa_nid=p.nid AND
+      p.field_department_id_nid=d.nid AND
+      d.field_department_name_value='%s'";
+  db_query($sql, $level, $session, $semester, $department);
+
+
+  drupal_set_message('Approval Successfull');
+  $_SESSION['eduerpvcapprovalform'] = NULL; // Just in case they somehow come back to the form
+
+  $departmentenc = rawurlencode($department);
+  $sessionenc = rawurlencode($session);
+  drupal_goto('grading/stats', "department={$departmentenc}&level={$level}&session={$sessionenc}&semester={$semester}");
+}
+
+
+function grading_stats_uni_form(&$obj) {
+  $sessiondefault = variable_get('eduerp_current_session', '');
+  $semesterdefault = variable_get('eduerp_current_semester', 1);
+
+  $form['session'] = array(
+    '#type' => 'select',
+    '#default_value' => $sessiondefault,
+    '#options' => _grading_session_list(),
+    '#title' => 'Session',
+    '#ahah' =>array(
+      'event'   => 'change',
+      'path'    => 'grading/ahahstatsuni',
+      'wrapper' => 'stats_here_uni',
+      'method'  => 'replace',
+      'effect'  => 'fade'
+      ),
+    '#required' => true
+    );
+
+  $form['semester'] = array(
+    '#type' => 'select',
+    '#default_value' => $semesterdefault,
+    '#options' => _grading_semester_list(),
+    '#title' => 'Semester',
+    '#ahah' =>array(
+      'event'   => 'change',
+      'path'    => 'grading/ahahstatsuni',
+      'wrapper' => 'stats_here_uni',
+      'method'  => 'replace',
+      'effect'  => 'fade'
+      ),
+    '#required' => true
+    );
+
+  $form['level'] = array(
+    '#type' => 'select',
+    '#options' => _grading_level_list_any(),
+    '#title' => 'Level',
+    '#ahah' =>array(
+      'event'   => 'change',
+      'path'    => 'grading/ahahstatsuni',
+      'wrapper' => 'stats_here_uni',
+      'method'  => 'replace',
+      'effect'  => 'fade'
+      )
+    );
+
+  $form['college'] = array(
+    '#type' => 'select',
+    '#options' => _grading_college_list_any(),
+    '#title' => 'Faculty',
+    '#ahah' =>array(
+      'event'   => 'change',
+      'path'    => 'grading/ahahstatsuni',
+      'wrapper' => 'stats_here_uni',
+      'method'  => 'replace',
+      'effect'  => 'fade'
+      )
+    );
+
+  $form['department'] = array(
+    '#type' => 'select',
+    '#options' => _grading_department_list_any(),
+    '#title' => 'Department',
+    '#ahah' =>array(
+      'event'   => 'change',
+      'path'    => 'grading/ahahstatsuni',
+      'wrapper' => 'stats_here_uni',
+      'method'  => 'replace',
+      'effect'  => 'fade'
+      )
+    );
+
+  $form['programme'] = array(
+    '#type' => 'select',
+    '#options' => _grading_programme_list_any(),
+    '#title' => 'Programme',
+    '#ahah' =>array(
+      'event'   => 'change',
+      'path'    => 'grading/ahahstatsuni',
+      'wrapper' => 'stats_here_uni',
+      'method'  => 'replace',
+      'effect'  => 'fade'
+      )
+    );
+
+  $form['updatebutton'] = array(
+    '#type' => 'button',
+    '#value' => 'Show Grade Statistics for above selection',
+    '#ahah' => array(
+      'path'    => 'grading/ahahstatsuni',
+      'wrapper' => 'stats_here_uni',
+      'method'  => 'replace',
+      'effect'  => 'fade'
+      )
+    );
+
+  $form['statshereuni'] = array(
+    '#type' => 'markup',
+    '#prefix' => '<div id="stats_here_uni">',
+    '#value' => ' ',
+    '#suffix' => '</div>',
+    );
+
+  return $form;
+}
+
+
+function grading_stats_uni_form_submit($form, &$state) {
+  drupal_set_message('Submitted<br />');
+}
+
+
+function _grading_ahah_stats_uni() {
+  global $user;
+  global $base_url;
+
+  $session = stripslashes($_POST['session']);
+  $sessionenc = rawurlencode($session);
+
+  $semester = stripslashes($_POST['semester']);
+
+  if (!empty($_POST['level'])) {
+    $levelparm = stripslashes($_POST['level']);
+  }
+  else {
+    $levelparm = 'All';
+  }
+
+  if (!empty($_POST['college'])) {
+    $college = stripslashes($_POST['college']);
+  }
+  else {
+    $college = 'All';
+  }
+
+  if (!empty($_POST['department'])) {
+    $department = stripslashes($_POST['department']);
+  }
+  else {
+    $department = 'All';
+  }
+
+  if (!empty($_POST['programme'])) {
+    $programme = stripslashes($_POST['programme']);
+  }
+  else {
+    $programme = 'All';
+  }
+
+  if ($programme !== 'All') {
+    $title = 'PROGRAMME';
+    $queryvalue = $programme;
+    $querywhere = "AND p.field_programme_name_value='%s'";
+  }
+  elseif ($department !== 'All') {
+    $title = 'DEPARTMENTAL';
+    $queryvalue = $department;
+    $querywhere = "AND d.field_department_name_value='%s'";
+  }
+  elseif ($college !== 'All') {
+    $title = 'FACULTY';
+    $queryvalue = $college;
+    $querywhere = "AND co.field_college_name_value='%s'";
+  }
+  else {
+    $title = 'UNIVERSITY';
+    $queryvalue = FALSE;
+    $querywhere = '';
+  }
+
+  $output = '<br /><table class="body-table"><tbody>';
+  $output .= '<tr><th valign="top" class="table-label" colspan="5">' . $title . ' SUMMARY RESULTS</th></tr>';
+
+  $output .= '<tr>';
+  $output .= '<td valign="top" class="table-label">LEVEL</td>';
+  $output .= '<td valign="top" class="table-label">Total No. of Registered Students</td>';
+  $output .= '<td valign="top" class="table-label">No. of Students that Completed Exams</td>';
+  $output .= '<td valign="top" class="table-label">No. of Students that Partially Completed Exams</td>';
+  $output .= '<td valign="top" class="table-label">No. of Absent Students</td>';
+  $output .= '</tr>';
+
+  $levels = _grading_level_list();
+
+  foreach ($levels as $level) {
+    if (($levelparm === All) || ($levelparm == $level)) {
+
+      // Display statistics on exams completed
+      $sql = "SELECT
+        COUNT(*) AS number_students,
+        SUM(fully) AS sumfully,
+        SUM(part) AS sumpart,
+        SUM(none) AS sumnone,
+        MIN(ca1l) AS ca1locked,
+        MIN(ca2l) AS ca2locked,
+        MIN(ca3l) AS ca3locked,
+        MIN(ca4l) AS ca4locked,
+        MIN(examl) AS examlocked
+      FROM
+        (
+          SELECT
+            BIT_AND(sg.field_exam_score_value > 0) AS fully,
+            BIT_OR(sg.field_exam_score_value > 0) AS part,
+            BIT_AND(sg.field_exam_score_value = 0) AS none,
+            MIN(sg.field_ca1locked_value) AS ca1l,
+            MIN(sg.field_ca2locked_value) AS ca2l,
+            MIN(sg.field_ca3locked_value) AS ca3l,
+            MIN(sg.field_ca4locked_value) AS ca4l,
+            MIN(sg.field_examscorelocked_value) AS examl
+          FROM {content_type_student_grades} sg, {content_type_student_gpa} gpa, {content_type_program} p, {content_type_department} d, {content_type_college} co
+          WHERE
+            sg.field_student_gpa_nid=gpa.nid AND
+            sg.field_dropped_value=0 AND
+            gpa.field_level_name_gpa_value='%s' AND
+            gpa.field_sess_name_gpa_value='%s' AND
+            gpa.field_semester_name_gpa_value='%s' AND
+            gpa.field_program_ref_gpa_nid=p.nid AND
+            p.field_department_id_nid=d.nid AND
+            d.field_college_id_nid=co.nid
+            {$querywhere}
+          GROUP BY sg.field_mat_no_uid
+        ) AS eachstudent";
+      if ($queryvalue) $summaryrows = db_query($sql, $level, $session, $semester, $queryvalue);
+      else             $summaryrows = db_query($sql, $level, $session, $semester);
+      $summaryrow = db_fetch_object($summaryrows);
+
+      $output .= '<tr>';
+      $output .= '<td valign="top" class="table-label">' . $level . '</td>';
+      $output .= '<td valign="top">' . $summaryrow->number_students . '</td>';
+      $output .= '<td valign="top">' . $summaryrow->sumfully . '</td>';
+      $output .= '<td valign="top">' . ($summaryrow->sumpart - $summaryrow->sumfully) . '</td>';
+      $output .= '<td valign="top">' . $summaryrow->sumnone . '</td>';
+      $output .= '</tr>';
+    }
+  }
+
+  foreach ($levels as $level) {
+    if (($levelparm === All) || ($levelparm == $level)) {
+
+      $sql = "SELECT DISTINCT d.field_department_name_value AS department
+        FROM {content_type_student_gpa} gpa, {content_type_program} p, {content_type_department} d, {content_type_college} co
+        WHERE
+          gpa.field_level_name_gpa_value='%s' AND
+          gpa.field_sess_name_gpa_value='%s' AND
+          gpa.field_semester_name_gpa_value='%s' AND
+          gpa.field_program_ref_gpa_nid=p.nid AND
+          p.field_department_id_nid=d.nid AND
+          d.field_college_id_nid=co.nid
+          {$querywhere}
+          ORDER BY department ASC";
+      if ($queryvalue) $programmerows = db_query($sql, $level, $session, $semester, $queryvalue);
+      else             $programmerows = db_query($sql, $level, $session, $semester);
+
+      $first = true;
+      while ($programmerow = db_fetch_object($programmerows)) {
+        if ($first) {
+          $output .= '<tr><td colspan="5"><br /></td></tr>';
+          $output .= '<tr><td colspan="5">View Department Details (for level ' . $level . ')...</td></tr>';
+          $first = false;
+        }
+        $departmentenc = rawurlencode($programmerow->department);
+        $output .= '<tr><td colspan="5"><a href="' . $base_url . "/grading/stats?department={$departmentenc}&level={$level}&session={$sessionenc}&semester={$semester}" . '">' . $programmerow->department . '</a></td></tr>';
+      }
+    }
+  }
+
+  $output .= '</tbody></table>';
+
+  print drupal_to_js(array('data' => $output, 'status' => true));
+
+  exit();
+}
+
+
+function grading_student_details_form(&$obj) {
+
+  $form['studentname'] = array(
+    '#type' => 'select',
+    '#options' => _grading_student_list(),
+    '#title' => 'Student Name',
+    '#ahah' =>array(
+      'event'   => 'change',
+      'path'    => 'grading/ahahstudentdetails',
+      'wrapper' => 'studentdata_here',
+      'method'  => 'replace',
+      'effect'  => 'fade'
+      )
+    );
+
+  $form['studentmat'] = array(
+    '#type' => 'select',
+    '#options' => _grading_mat_list(),
+    '#title' => 'Student Matriculation Number',
+    '#ahah' =>array(
+      'event'   => 'change',
+      'path'    => 'grading/ahahstudentdetails',
+      'wrapper' => 'studentdata_here',
+      'method'  => 'replace',
+      'effect'  => 'fade'
+      )
+    );
+
+  $form['updatestudentbutton'] = array(
+    '#type' => 'button',
+    '#value' => "Show all of the selected Student's Courses",
+    '#ahah' => array(
+      'path'    => 'grading/ahahstudentdetails',
+      'wrapper' => 'studentdata_here',
+      'method'  => 'replace',
+      'effect'  => 'fade'
+      )
+    );
+
+  $form['studentdatahere'] = array(
+    '#type' => 'markup',
+    '#prefix' => '<div id="studentdata_here">',
+    '#value' => ' ',
+    '#suffix' => '</div>',
+    );
+
+  return $form;
+}
+
+
+function _grading_student_list() {
+  $names = array();
+  $names[0] = '';
+  $sql = "SELECT CONCAT(pro.field_profile_last_name_value, ', ', pro.field_profile_first_name_value, ' ', IFNULL(pro.field_profile_middle_name_value, ''), ' (', u.name, ' ', u.mail, ' ', CAST(u.uid AS CHAR), ')') AS name, u.uid
+    FROM users u, users_roles ur, role r, {node} npro, {content_type_profile} pro
+    WHERE
+      u.uid=ur.uid AND ur.rid=r.rid AND r.name='Student' AND
+      u.uid=npro.uid AND npro.type='profile' AND npro.vid=pro.vid
+    ORDER BY name ASC";
+  $rows = db_query($sql);
+  while ($row = db_fetch_object($rows)) {
+    $names[$row->uid] = $row->name;
+  }
+  return $names;
+}
+
+
+function _grading_mat_list() {
+  $names = array();
+  $names[0] = '';
+  $sql = "SELECT CONCAT(u.name, ' (', pro.field_profile_last_name_value, ', ', pro.field_profile_first_name_value, ' ', IFNULL(pro.field_profile_middle_name_value, ''), ' ', u.mail, ' ', CAST(u.uid AS CHAR), ')') AS name, u.uid
+    FROM users u, users_roles ur, role r, {node} npro, {content_type_profile} pro
+    WHERE
+      u.uid=ur.uid AND ur.rid=r.rid AND r.name='Student' AND
+      u.uid=npro.uid AND npro.type='profile' AND npro.vid=pro.vid
+    ORDER BY name ASC";
+  $rows = db_query($sql);
+  while ($row = db_fetch_object($rows)) {
+    $names[$row->uid] = $row->name;
+  }
+  return $names;
+}
+
+
+function grading_student_details_form_submit($form, &$state) {
+  drupal_set_message('Student: ' . $state['values']['studentname'] . '<br />');
+}
+
+
+function _grading_ahah_studentdetails() {
+  global $user;
+  global $base_url;
+
+  if (empty($_POST['studentname']) && empty($_POST['studentmat'])) {
+    print drupal_to_js(array('data' => 'You must select either a Student Name or Matriculation Number', 'status' => true));
+    exit();
+  }
+  elseif (!empty($_POST['studentname'])) $uid = (int)$_POST['studentname'];
+  else                                   $uid = (int)$_POST['studentmat'];
+
+  $student_profile = new UserProfile($uid);
+
+  $sql = "SELECT d.nid, d.field_college_id_nid
+    FROM {content_type_program} p
+    INNER JOIN {content_type_department} d ON p.field_department_id_nid=d.nid
+    WHERE p.nid=%d";
+  $rs = db_query($sql, $student_profile->profile_first_choice);
+  $r = db_fetch_object($rs);
+
+  if (!staff_has_eduerp_role($user->uid, 0, 0, array('University Examination Viewer', 'University Examination Officer', 'Registrar', 'Vice-Chancellor')) &&
+    !staff_has_eduerp_role($user->uid, $r->nid, 0, array('Department Examination Viewer', 'Department Examination Officer', 'Head of Department')) &&
+    !staff_has_eduerp_role($user->uid, 0, $r->field_college_id_nid, array('Faculty Examination Viewer', 'Faculty Examination Officer', 'Dean of Faculty'))) {
+    print drupal_to_js(array('data' => 'You do Not have Rights to see data for this Student', 'status' => true));
+    exit();
+  }
+
+  $output = '<br /><table class="body-table"><tbody>';
+  $output .= '<tr><th valign="top" class="table-label" colspan="14">Courses for this Student</th></tr>';
+
+  $output .= '<tr>';
+  $output .= '<td valign="top" class="table-label">Course</td>';
+  $output .= '<td valign="top" class="table-label">Programme</td>';
+  $output .= '<td valign="top" class="table-label">Department</td>';
+  $output .= '<td valign="top" class="table-label">Session</td>';
+  $output .= '<td valign="top" class="table-label">Semester</td>';
+  $output .= '<td valign="top" class="table-label">Level</td>';
+  $output .= '<td valign="top" class="table-label">CA1</td>';
+  $output .= '<td valign="top" class="table-label">CA2</td>';
+  $output .= '<td valign="top" class="table-label">CA3</td>';
+  $output .= '<td valign="top" class="table-label">CA4</td>';
+  $output .= '<td valign="top" class="table-label">Exam</td>';
+  $output .= '<td valign="top" class="table-label">Total</td>';
+  $output .= '<td valign="top" class="table-label">Grade</td>';
+  $output .= '<td valign="top" class="table-label">Dropped?</td>';
+  $output .= '<td valign="top" class="table-label">Comment</td>';
+  $output .= '</tr>';
+
+  $sql = "SELECT
+      c.field_code_value AS coursecode,
+      p.field_programme_name_value AS programme,
+      d.field_department_name_value AS department,
+      ci.field_sess_name_value AS session,
+      ci.field_semester_name_value AS semester,
+      ci.field_location_value AS location,
+      gpa.field_level_name_gpa_value AS level,
+      sg.field_ca1_value AS ca1,
+      sg.field_ca2_value AS ca2,
+      sg.field_ca3_value AS ca3,
+      sg.field_ca4_value AS ca4,
+      sg.field_exam_score_value AS exam,
+      sg.field_total_score_value AS total,
+      sg.field_grade_value AS grade,
+      sg.field_dropped_value AS dropped,
+      sg.field_comment_grades_value AS comment
+    FROM
+      {content_type_student_grades} sg,
+      {content_type_course_instance} ci,
+      {content_type_course} c,
+      {content_type_student_gpa} gpa,
+      {content_type_program} p,
+      {content_type_department} d
+    WHERE
+      sg.field_mat_no_uid=%d AND
+      sg.field_course_instance_nid=ci.nid AND
+      ci.field_course_id_nid=c.nid AND
+      sg.field_student_gpa_nid=gpa.nid AND
+      gpa.field_program_ref_gpa_nid=p.nid AND
+      p.field_department_id_nid=d.nid
+    ORDER BY session ASC, semester ASC, coursecode ASC";
+  $rows = db_query($sql, $uid);
+  while ($row = db_fetch_object($rows)) {
+    $coursecodeenc = rawurlencode($row->coursecode);
+    $programmeenc = rawurlencode($row->programme);
+    $departmentenc = rawurlencode($row->department);
+    $sessionenc = rawurlencode($row->session);
+
+    $output .= '<tr>';
+    $output .= '<td><a href="' . $base_url . "/course?coursecode={$coursecodeenc}&session={$sessionenc}&semester={$row->semester}&location={$row->location}" . '">' . $row->coursecode . '</a></td>';
+    $output .= '<td><a href="' . $base_url . "/gpa?programme={$programmeenc}&level={$row->level}&session={$sessionenc}&semester={$row->semester}" . '">' . $row->programme . '</a></td>';
+    $output .= '<td><a href="' . $base_url . "/grading/stats?department={$departmentenc}&level={$row->level}&session={$sessionenc}&semester={$row->semester}" . '">' . $row->department . '</a></td>';
+    $output .= "<td>{$row->session}</td>";
+    $output .= "<td>{$row->semester}</td>";
+    $output .= "<td>{$row->level}</td>";
+    $output .= "<td>{$row->ca1}</td>";
+    $output .= "<td>{$row->ca2}</td>";
+    $output .= "<td>{$row->ca3}</td>";
+    $output .= "<td>{$row->ca4}</td>";
+    $output .= "<td>{$row->exam}</td>";
+    $output .= "<td>{$row->total}</td>";
+    $output .= "<td>{$row->grade}</td>";
+    $output .= '<td>';
+    if ($row->dropped) $output .=  'Dropped';
+    $output .= '</td>';
+    $output .= '<td>';
+    if (!empty($row->comment)) $output .=  check_plain($row->comment);
+    $output .= '</td>';
+    $output .= '</tr>';
+  }
+  $output .= '</tbody></table>';
+
+  $output .= '<br /><table class="body-table"><tbody>';
+  $output .= '<tr><th valign="top" class="table-label" colspan="9">GPAs for this Student</th></tr>';
+
+  $output .= '<tr>';
+  $output .= '<td valign="top" class="table-label">Programme</td>';
+  $output .= '<td valign="top" class="table-label">Department</td>';
+  $output .= '<td valign="top" class="table-label">Session</td>';
+  $output .= '<td valign="top" class="table-label">Semester</td>';
+  $output .= '<td valign="top" class="table-label">Level</td>';
+  $output .= '<td valign="top" class="table-label">Credit Load Registered</td>';
+  $output .= '<td valign="top" class="table-label">Credit Load Completed</td>';
+  $output .= '<td valign="top" class="table-label">GPA</td>';
+  $output .= '<td valign="top" class="table-label">cGPA</td>';
+  $output .= '</tr>';
+
+  $sql = "SELECT
+      p.field_programme_name_value AS programme,
+      d.field_department_name_value AS department,
+      g.field_sess_name_gpa_value AS session,
+      g.field_semester_name_gpa_value AS semester,
+      g.field_level_name_gpa_value AS level,
+      g.field_credit_load_registered_value AS credit_load_registered,
+      g.field_credit_load_completed_value AS credit_load_completed,
+      g.field_gpa_value AS gpa,
+      sp.field_cgpa_sp_value AS cgpa
+    FROM
+      {content_type_student_gpa} g,
+      {content_type_student_program} sp,
+      {content_type_program} p,
+      {content_type_department} d
+    WHERE
+      field_student_ref_gpa_uid=%d AND
+      g.field_program_ref_gpa_nid=p.nid AND
+      g.field_student_program_ref_gpa_nid=sp.nid AND
+      p.field_department_id_nid=d.nid
+    ORDER BY session ASC, semester ASC, programme ASC";
+  $rows = db_query($sql, $uid);
+  while ($row = db_fetch_object($rows)) {
+    $programmeenc = rawurlencode($row->programme);
+    $departmentenc = rawurlencode($row->department);
+    $sessionenc = rawurlencode($row->session);
+
+    $output .= '<tr>';
+    $output .= '<td><a href="' . $base_url . "/gpa?programme={$programmeenc}&level={$row->level}&session={$sessionenc}&semester={$row->semester}" . '">' . $row->programme . '</a></td>';
+    $output .= '<td><a href="' . $base_url . "/grading/stats?department={$departmentenc}&level={$row->level}&session={$sessionenc}&semester={$row->semester}" . '">' . $row->department . '</a></td>';
+    $output .= "<td>{$row->session}</td>";
+    $output .= "<td>{$row->semester}</td>";
+    $output .= "<td>{$row->level}</td>";
+    $output .= "<td>{$row->credit_load_registered}</td>";
+    $output .= "<td>{$row->credit_load_completed}</td>";
+    $output .= "<td>{$row->gpa}</td>";
+    $output .= "<td>{$row->cgpa}</td>";
+    $output .= '</tr>';
+  }
+  $output .= '</tbody></table>';
+
+  print drupal_to_js(array('data' => $output, 'status' => true));
+
+  exit();
+}
+
+
+function grading_cron() {
+  global $base_url;
+
+  $notifications = db_query("SELECT * FROM cron_notification LIMIT 500");
+  while ($notification = db_fetch_object($notifications)) {
+    if ($notification->instruction == 3) {
+
+      $source_user = user_load($notification->approver_uid);
+      $user_profile = new UserProfile($notification->approver_uid);
+      $name = '';
+      if (!empty($user_profile->profile_first_name) && !empty($user_profile->profile_last_name)) {
+        $middle = '';
+        if (!empty($user_profile->profile_middle_name)) $middle = $user_profile->profile_middle_name . ' ';
+        $name = "$user_profile->profile_first_name {$middle}$user_profile->profile_last_name";
+      }
+
+      $destination_user = user_load($notification->student_uid);
+      $user_profile = new UserProfile($notification->student_uid);
+      $gradestext = $notification->gradestext;
+      $programme = $notification->programme;
+      $subject = "$gradestext for $programme Approved";
+
+      $body = '';
+      if (!empty($user_profile->profile_first_name) && !empty($user_profile->profile_last_name)) {
+        $middle = '';
+        if (!empty($user_profile->profile_middle_name)) $middle = $user_profile->profile_middle_name . ' ';
+        $body .= "Dear $user_profile->profile_first_name {$middle}$user_profile->profile_last_name,\n\n";
+      }
+      $body .= "I have approved the $gradestext for $programme\n\n";
+      $body .= "To view your grades go to $base_url/student\n";
+      $body .= "You will have to login first.\n\n";
+      $body .= "{$name}\n";
+
+      $message = drupal_mail('grading', 'notifystudent', $destination_user->mail, language_default(), array(), $source_user->mail, FALSE);
+      $message['subject'] = $subject;
+      $message['body'] = $body;
+      drupal_mail_send($message);
+    }
+    if ($notification->instruction == 1 || $notification->instruction == 3) {
+      // Placeholder to send SMS
+    }
+    db_query("DELETE FROM cron_notification WHERE approver_uid=%d AND student_uid=%d AND gradestext='%s' AND programme='%s'", $notification->approver_uid, $notification->student_uid, $notification->gradestext, $notification->programme);
+  }
+}
+
+function grading_views_api() {
+  return array(
+    'api' => 2,
+    'path' => drupal_get_path('module', 'grading'),
+  );
+}
+
+?>

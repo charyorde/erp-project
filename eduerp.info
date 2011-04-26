@@ -1,0 +1,16 @@
+; $Id$
+name = EduERP
+description = EduERP Module
+package = EduERP 
+dependencies[] = content
+dependencies[] = fieldgroup
+dependencies[] = content_copy
+dependencies[] = userreference
+dependencies[] = views
+dependencies[] = computed_field
+dependencies[] = nodereference
+dependencies[] = editablefields
+dependencies[] = content_permissions
+dependencies[] = content_profile_registration
+version = 1.0
+core = 6.x

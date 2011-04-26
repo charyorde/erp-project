@@ -1,0 +1,14 @@
+name = Student
+description = EduERP Student Module
+package = EduERP
+dependencies[] = eduerp
+dependencies[] = content_profile
+dependencies[] = date
+dependencies[] = number
+dependencies[] = views
+dependencies[] = imagefield
+dependencies[] = filefield
+dependencies[] = auto_nodetitle
+dependencies[] = computed_field
+version = 1.0
+core = 6.x
